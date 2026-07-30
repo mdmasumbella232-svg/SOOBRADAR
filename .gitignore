@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Bot sensitive data — DO NOT commit
+config.py
+lock_state.json
+stats.json
+bot.log
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
