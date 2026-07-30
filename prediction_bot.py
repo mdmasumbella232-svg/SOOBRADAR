@@ -7,7 +7,10 @@ import traceback
 import urllib.request
 import urllib.parse
 from datetime import datetime
-import config
+try:
+    import config
+except ImportError:
+    import config_example as config
 
 # Force UTF-8 output so emojis work on all terminals
 if hasattr(sys.stdout, 'reconfigure'):
