@@ -678,4 +678,10 @@ if __name__ == "__main__":
     log("SOOBRADAR Bot started — 24/7 mode active.")
     log(f"Log file: {LOG_FILE}")
     log("=" * 50)
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("Bot stopped manually by user (KeyboardInterrupt). Exiting cleanly...")
+    except Exception as e:
+        log(f"Fatal error: {e}", error=True)
+
