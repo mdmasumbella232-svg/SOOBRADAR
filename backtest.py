@@ -1,7 +1,10 @@
 import sys
 import time
 from datetime import datetime
-import config
+try:
+    import config
+except ImportError:
+    import config_example as config
 from prediction_bot import InforadarAPIClient, PredictionEngine
 
 def parse_final_score(score_str):
