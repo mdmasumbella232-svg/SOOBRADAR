@@ -25,5 +25,5 @@ MIN_ALG1_RATING_THRESHOLD = 0.8  # Alert if absolute value of Alg.1 exceeds this
 
 # General monitoring settings
 POLL_INTERVAL_SECONDS = 60
-REQUEST_TIMEOUT_SECONDS = 10
+REQUEST_TIMEOUT_SECONDS = 30
 MAX_CACHE_SIZE = 1000
