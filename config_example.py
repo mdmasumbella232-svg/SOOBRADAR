@@ -1,8 +1,10 @@
 # Configuration settings for SOOBRADAR Telegram Bot
 
+import os
+
 # Telegram Settings
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 
 # API Settings
 BASE_URL = "https://inforadar.live"
