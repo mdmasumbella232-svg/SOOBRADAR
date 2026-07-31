@@ -619,6 +619,16 @@ def main():
                         event_id = game.get("id")
                         if not event_id:
                             continue
+                            
+                        # Do not bet on games that are finished, cancelled, or in final transition
+                        time_status = str(game.get("timeStatus", ""))
+                        if time_status in ["3", "4", "99", "10"]:
+                            continue
+                            
+                        # Prevent betting on basketball games that show 'Q - ' (post-game transition)
+                        time_info = game.get("time", {})
+                        if sport_id == config.SPORT_BASKETBALL and str(time_info.get("tt", "")) == "":
+                            continue
                         
                         scores = game.get("scores", "0-0")
                         time_info = game.get("time", {})
