@@ -625,11 +625,22 @@ def main():
                         if time_status in ["3", "4", "99", "10"]:
                             continue
                             
-                        # Prevent betting on basketball games that show 'Q - ' (post-game transition)
+                        # Prevent betting on games in the absolute final moments (API ghost lines)
                         time_info = game.get("time", {})
-                        if sport_id == config.SPORT_BASKETBALL and str(time_info.get("tt", "")) == "":
-                            continue
-                        
+                        if sport_id == config.SPORT_BASKETBALL:
+                            q_str = str(time_info.get("q", ""))
+                            tm_str = str(time_info.get("tm", ""))
+                            if str(time_info.get("tt", "")) == "":
+                                continue
+                            if q_str == "4" and tm_str in ["0", "1"]:
+                                continue
+                        elif sport_id == config.SPORT_SOCCER:
+                            try:
+                                tm_val = int(time_info.get("tm", 0))
+                                if tm_val >= 88:
+                                    continue
+                            except (ValueError, TypeError):
+                                pass
                         scores = game.get("scores", "0-0")
                         time_info = game.get("time", {})
                         state_key = f"{scores}_{json.dumps(time_info)}"
