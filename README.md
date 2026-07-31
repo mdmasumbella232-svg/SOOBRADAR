@@ -1,4 +1,4 @@
-# SOOBRADAR — Live Prediction Telegram Bot
+# SlamRadar — Live Prediction Telegram Bot
 
 A lightweight, 3G-safe, low-resource live prediction bot for soccer and basketball using [inforadar.live](https://inforadar.live).
 
