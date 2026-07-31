@@ -696,7 +696,7 @@ def main():
 
 if __name__ == "__main__":
     log("=" * 50)
-    log("SOOBRADAR Bot started — 24/7 mode active.")
+    log("SlamRadar Bot started — 24/7 mode active.")
     log(f"Log file: {LOG_FILE}")
     log("=" * 50)
     try:
