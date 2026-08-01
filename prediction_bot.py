@@ -235,12 +235,12 @@ class PredictionEngine:
                     # Check Away Win odds drop
                     if opening_away and live_away and config.MIN_ODDS <= live_away <= config.MAX_ODDS:
                         drop_away = cls.calculate_drop_pct(opening_away, live_away)
-                        if drop_away >= config.ODDS_DROP_THRESHOLD_PCT:
+                        if drop_away >= 25.0:
                             prob_open = (1.0 / opening_away) * 100
                             prob_live = (1.0 / live_away) * 100
                             prob_shift = prob_live - prob_open
                             
-                            confidence = min(99, int(70 + (drop_away - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
+                            confidence = min(99, int(70 + (drop_away - 25.0) * 1.5))
                             
                             predictions.append({
                                 "market": market_name,
@@ -260,7 +260,16 @@ class PredictionEngine:
                             })
 
             # --- STRATEGY 2: Rating-based (Alg.1) Deviation ---
-            if market_name == "Total":
+            # Block Over bets in Soccer after 75th minute (too late, too volatile)
+            soccer_late_game = False
+            if sport_id == config.SPORT_SOCCER:
+                try:
+                    match_min = int(match.get("time", {}).get("tm", 0))
+                    if match_min >= 75:
+                        soccer_late_game = True
+                except (ValueError, TypeError):
+                    pass
+            if market_name == "Total" and not soccer_late_game:
                 ratings = latest_live.get("rating", [])
                 if ratings and isinstance(ratings, list) and len(ratings) > 0:
                     rating_detail = ratings[0]
@@ -270,7 +279,7 @@ class PredictionEngine:
                         
                         if rating_val is not None:
                             abs_rating = abs(rating_val)
-                            if abs_rating >= config.MIN_ALG1_RATING_THRESHOLD:
+                            if abs_rating >= 1.2:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
                                 
                                 opening_over = first_prematch.get("row1")
