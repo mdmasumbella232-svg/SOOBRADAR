@@ -237,7 +237,7 @@ class PredictionEngine:
             
             if sport_id == config.SPORT_SOCCER:
                 if open_home and open_away:
-                    # RULE 1: Competitive Under (Soccer)
+                    # RULE 1: Competitive Under (Soccer) — ACTIVE
                     if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
                         open_line = p_tot.get("row2")
                         live_line = l_tot.get("row2")
@@ -251,40 +251,7 @@ class PredictionEngine:
                                     "alg_val": "Comp_Under", "alg_dir": "Under",
                                     "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line}."
                                 })
-                    
-                    # RULE 2: Blowout Over (Soccer)
-                    if open_home <= 1.30 or open_away <= 1.30:
-                        ah_line = p_ah.get("row2")
-                        if ah_line is not None:
-                            # Handicap is usually negative for the favorite (e.g. -2.00)
-                            # We check if absolute handicap is >= 1.75
-                            if abs(ah_line) >= 1.75:
-                                open_line = p_tot.get("row2")
-                                live_line = l_tot.get("row2")
-                                if open_line is not None and open_line >= 3.75:
-                                    predictions.append({
-                                        "market": "Total", "prediction": f"Over {live_line}", "confidence": 95,
-                                        "total_dir": "Over", "total_line": f"{live_line}",
-                                        "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "N/A",
-                                        "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
-                                        "alg_val": "Blowout_Over", "alg_dir": "Over",
-                                        "reason": f"Soccer Rule 2: Blowout Over pattern triggered. Massive favorite, High Total."
-                                    })
-                                    
-                    # RULE 3: Stale Line Over (Soccer)
-                    if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
-                        open_line = p_tot.get("row2")
-                        live_line = l_tot.get("row2")
-                        if open_line in [3.00, 3.25, 3.50] and live_line is not None:
-                            if live_line == open_line:
-                                predictions.append({
-                                    "market": "Total", "prediction": f"Over {live_line}", "confidence": 80,
-                                    "total_dir": "Over", "total_line": f"{live_line}",
-                                    "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "0.0",
-                                    "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
-                                    "alg_val": "Stale_Over", "alg_dir": "Over",
-                                    "reason": f"Soccer Rule 3: Stale Line Over pattern triggered. Line untouched at {open_line}."
-                                })
+                    # RULE 2 (Blowout Over) and RULE 3 (Stale Line Over) REMOVED — poor backtest performance
             
             elif sport_id == config.SPORT_BASKETBALL:
                 if open_home and open_away:
