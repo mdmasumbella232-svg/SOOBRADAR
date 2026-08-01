@@ -799,7 +799,32 @@ def main():
                 home = lock_state.get("home")
                 away = lock_state.get("away")
                 prediction = lock_state.get("prediction")
-                
+
+                # --- MAX LOCK DURATION: Auto-unlock if stuck too long ---
+                MAX_LOCK_SECONDS = 10800 if sport_id == config.SPORT_SOCCER else 7200  # 3h Soccer, 2h Basketball
+                locked_at_str = lock_state.get("locked_at")
+                if locked_at_str:
+                    try:
+                        locked_at_dt = datetime.fromisoformat(locked_at_str)
+                        elapsed = (datetime.now() - locked_at_dt).total_seconds()
+                        if elapsed > MAX_LOCK_SECONDS:
+                            log(f"[TIMEOUT] Bot has been locked for {elapsed/3600:.1f}h on event {event_id}. Force-unlocking.", error=True)
+                            stats = update_stats("UNKNOWN")
+                            timeout_msg = (
+                                f"⏰ <b>BET TIMEOUT — UNKNOWN</b>\n\n"
+                                f"Event: {home} vs {away}\n"
+                                f"Pick: {prediction}\n"
+                                f"Reason: API unreachable for {elapsed/3600:.1f} hours. Could not confirm result.\n\n"
+                                f"🔓 <i>Bot is now UNLOCKED — scanning for next pick</i>"
+                            )
+                            bot.send_message(timeout_msg)
+                            save_lock_state({"locked": False})
+                            log(f"[UNLOCK] Force-unlocked after timeout. Scanning for next pick...")
+                            time.sleep(config.POLL_INTERVAL_SECONDS)
+                            continue
+                    except Exception as te:
+                        log(f"[TIMEOUT] Could not parse locked_at: {te}", error=True)
+
                 log(f"[LOCKED] Monitoring {home} vs {away} | Event: {event_id} | Pick: {prediction}")
 
                 settled = False
@@ -929,6 +954,7 @@ def main():
                                 # Lock the bot
                                 new_lock = {
                                     "locked": True,
+                                    "locked_at": datetime.now().isoformat(),
                                     "sport_id": sport_id,
                                     "event_id": event_id,
                                     "home": game.get("home", {}).get("name", "Home"),
