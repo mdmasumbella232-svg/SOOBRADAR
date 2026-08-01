@@ -301,11 +301,16 @@ class PredictionEngine:
                                 live_line = latest_live.get("row2")
                                 live_under = latest_live.get("row3")
 
-                                # Determine the relevant live odds for the predicted direction
+                                # Determine the relevant live and opening odds for the predicted direction
                                 relevant_live_odds = live_over if dir_word == "Over" else live_under
-
+                                relevant_opening_odds = opening_over if dir_word == "Over" else opening_under
+                                
                                 # Enforce odds range filter — skip if outside 1.65–2.10
                                 if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
+                                    continue
+                                    
+                                # FILTER D: Require Odds Movement — the odds must have actually dropped below their opening price
+                                if relevant_opening_odds is not None and relevant_live_odds >= relevant_opening_odds:
                                     continue
 
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
