@@ -15,13 +15,18 @@ SPORT_SOCCER = 1
 SPORT_BASKETBALL = 18
 
 # Prediction Logic Tuning Parameters
-# 1X2 market parameters
-MIN_ODDS = 1.65
-MAX_ODDS = 2.10
-ODDS_DROP_THRESHOLD_PCT = 18.0  # Alert if odds drop by 18% or more compared to opening/prematch
+# === STRATEGY & RISK PARAMETERS ===
+MIN_ODDS = 1.65             # Minimum acceptable odds for any bet
+MAX_ODDS = 2.10             # Maximum acceptable odds for any bet
 
-# Alg.1 Rating Parameters
-MIN_ALG1_RATING_THRESHOLD = 0.8  # Alert if absolute value of Alg.1 exceeds this
+# Strategy 1 (1X2 Drop) Config
+ODDS_DROP_THRESHOLD_PCT = 20.0  # (Loosened) e.g., Drop from 2.50 to 2.00 is a 20% drop
+
+# Strategy 2 (Alg.1 Totals) Config
+MIN_ALG1_RATING_THRESHOLD = 1.0 # (Loosened) Minimum Alg.1 rating required to trigger
+
+# Strategy 3 (Abnormal Halftime Line) Config
+HT_ABNORMAL_LINE_GAP_THRESHOLD = 1.0 # Line must be at least this much higher than expected HT line
 
 # General monitoring settings
 POLL_INTERVAL_SECONDS = 60
