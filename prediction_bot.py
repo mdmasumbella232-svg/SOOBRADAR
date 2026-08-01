@@ -358,6 +358,48 @@ class PredictionEngine:
                                     "reason": f"Alg.1 Rating deviation detected: {rating_val:+.2f}."
                                 })
 
+            # --- STRATEGY 3: Abnormal Line Dynamics (Soccer Halftime) ---
+            if sport_id == config.SPORT_SOCCER and market_name == "Total" and home_score == 0 and away_score == 0:
+                time_info = match.get("time", {})
+                tm_str = str(time_info.get("tm", ""))
+                is_ht = False
+                if tm_str.upper() == "HT":
+                    is_ht = True
+                else:
+                    try:
+                        tm_val = int(tm_str)
+                        if 40 <= tm_val <= 55:
+                            is_ht = True
+                    except Exception:
+                        pass
+                
+                if is_ht:
+                    opening_line = first_prematch.get("row2")
+                    live_line = latest_live.get("row2")
+                    if opening_line is not None and live_line is not None and opening_line > 0:
+                        expected_ht_line = opening_line / 2.0
+                        if live_line >= (expected_ht_line + config.HT_ABNORMAL_LINE_GAP_THRESHOLD):
+                            # Ensure live Over odds are within acceptable range
+                            live_over = latest_live.get("row1")
+                            if live_over is not None and config.MIN_ODDS <= live_over <= config.MAX_ODDS:
+                                predictions.append({
+                                    "market": market_name,
+                                    "prediction": f"Over {live_line}",
+                                    "confidence": 85,
+                                    "total_dir": "Over",
+                                    "total_line": f"{live_line}",
+                                    "open_line": f"{opening_line}",
+                                    "now_line": f"{live_line}",
+                                    "line_diff": f"{live_line - opening_line:+.2f}",
+                                    "open_over": f"{first_prematch.get('row1', 0):.2f}" if first_prematch.get('row1') else "N/A",
+                                    "now_over": f"{live_over:.2f}",
+                                    "open_under": f"{first_prematch.get('row3', 0):.2f}" if first_prematch.get('row3') else "N/A",
+                                    "now_under": f"{latest_live.get('row3', 0):.2f}" if latest_live.get('row3') else "N/A",
+                                    "alg_val": "Anomaly",
+                                    "alg_dir": "Over",
+                                    "reason": f"0-0 at HT, but line is abnormally high ({live_line} vs expected {expected_ht_line})."
+                                })
+
         return predictions
 
 
