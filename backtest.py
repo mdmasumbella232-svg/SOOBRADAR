@@ -210,8 +210,13 @@ def scan_game(sport_id, game, odds_markets):
 
                 dir_word = direction if direction else ("Over" if alg_val > 0 else "Under")
                 live_odds = live_over if dir_word == "Over" else live_under
+                opening_odds = fp.get("row1") if dir_word == "Over" else fp.get("row3")
 
                 if not (live_odds and MIN_ODDS <= live_odds <= MAX_ODDS):
+                    continue
+                    
+                # FILTER D: Require Odds Movement
+                if opening_odds is not None and live_odds >= opening_odds:
                     continue
 
                 # Parse time info
