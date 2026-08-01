@@ -138,6 +138,120 @@ def scan_game(sport_id, game, odds_markets):
         fp        = market.get("firstPrematch", {})
         if not odds_list or not fp:
             continue
+            
+    # --- MULTI-MARKET / EARLY LIVE STRATEGIES (New Rules) ---
+    parsed_markets = {}
+    for market in odds_markets:
+        m_name = market.get("name", "")
+        m_odds = market.get("odds", [])
+        m_first = market.get("firstPrematch", {})
+        if m_odds and isinstance(m_odds, list):
+            # For backtesting, we need to find an entry in the first 10 minutes
+            early_live = None
+            for entry in reversed(m_odds):  # Iterate from start of match
+                gm = entry.get("game_time", 0)
+                if sport_id == config.SPORT_SOCCER:
+                    try:
+                        tm_val = int(str(gm))
+                        if 0 <= tm_val <= 10:
+                            early_live = entry
+                            break
+                    except:
+                        pass
+                elif sport_id == config.SPORT_BASKETBALL:
+                    q, tm = parse_quarter_and_seconds(gm)
+                    if q == 1:
+                        early_live = entry
+                        break
+            if not early_live:
+                early_live = m_odds[-1]  # fallback to earliest available
+                
+            parsed_markets[m_name] = {
+                "first": m_first,
+                "early_live": early_live
+            }
+
+    m_1x2 = parsed_markets.get("1X2", {})
+    p_1x2 = m_1x2.get("first", {})
+    l_1x2 = m_1x2.get("early_live", {})
+    
+    m_total = parsed_markets.get("Total", {})
+    p_tot = m_total.get("first", {})
+    l_tot = m_total.get("early_live", {})
+    
+    m_ah = parsed_markets.get("Handicap", {}) or parsed_markets.get("Asian Handicap", {})
+    p_ah = m_ah.get("first", {})
+    l_ah = m_ah.get("early_live", {})
+
+    open_home = p_1x2.get("row1")
+    open_away = p_1x2.get("row3")
+
+    if open_home and open_away:
+        if sport_id == config.SPORT_SOCCER:
+            if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
+                open_line = p_tot.get("row2")
+                live_line = l_tot.get("row2")
+                if open_line in [3.25, 3.50] and live_line is not None:
+                    if live_line == open_line - 0.25:
+                        triggers.append({
+                            "sport": sport_name, "market": "Total", "prediction": f"Under {live_line}",
+                            "label": f"Soccer Rule 1 (Competitive Under): Line dropped to {live_line}",
+                            "minute": "Early", "live_score": "0-0",
+                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
+                        })
+                
+                if open_line in [3.00, 3.25, 3.50] and live_line is not None:
+                    if live_line == open_line:
+                        triggers.append({
+                            "sport": sport_name, "market": "Total", "prediction": f"Over {live_line}",
+                            "label": f"Soccer Rule 3 (Stale Line Over): Line stayed at {live_line}",
+                            "minute": "Early", "live_score": "0-0",
+                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
+                        })
+            
+            if open_home <= 1.30 or open_away <= 1.30:
+                ah_line = p_ah.get("row2")
+                if ah_line is not None and abs(ah_line) >= 1.75:
+                    open_line = p_tot.get("row2")
+                    live_line = l_tot.get("row2")
+                    if open_line is not None and open_line >= 3.75:
+                        triggers.append({
+                            "sport": sport_name, "market": "Total", "prediction": f"Over {live_line}",
+                            "label": f"Soccer Rule 2 (Blowout Over): Massive favorite, line {open_line}",
+                            "minute": "Early", "live_score": "0-0",
+                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
+                        })
+        
+        elif sport_id == config.SPORT_BASKETBALL:
+            if open_home <= 1.40 or open_away <= 1.40:
+                fav_pred = "1X2_1" if open_home <= 1.40 else "1X2_2"
+                triggers.append({
+                    "sport": sport_name, "market": "1X2", "prediction": fav_pred,
+                    "label": f"Basketball Rule 1 (Heavy Favorite Lock): Odds <= 1.40",
+                    "minute": "Early", "live_score": "0-0",
+                    "final_score": final_score, "final_home": final_home, "final_away": final_away,
+                })
+            
+            if 1.50 <= open_home <= 2.50 and 1.50 <= open_away <= 2.50:
+                open_ah = p_ah.get("row2")
+                live_ah = l_ah.get("row2")
+                if open_ah is not None and live_ah is not None:
+                    ah_diff = live_ah - open_ah
+                    if abs(ah_diff) >= 1.0:
+                        fav_pred = "1X2_1" if ah_diff <= -1.0 else "1X2_2"
+                        triggers.append({
+                            "sport": sport_name, "market": "1X2", "prediction": fav_pred,
+                            "label": f"Basketball Rule 2 (Sharp Favorite Surge): Spread moved {ah_diff}",
+                            "minute": "Early", "live_score": "0-0",
+                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
+                        })
+
+    for market in odds_markets:
+        name      = market.get("name", "")
+        odds_list = market.get("odds", [])
+        fp        = market.get("firstPrematch", {})
+        if not odds_list or not fp:
+            continue
 
         open_r1 = fp.get("row1")
         open_r3 = fp.get("row3")
