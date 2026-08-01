@@ -405,11 +405,6 @@ class PredictionEngine:
                             if abs_rating >= 1.2:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
 
-                                is_basketball_fade = False
-                                if sport_id == config.SPORT_BASKETBALL and dir_word == "Under":
-                                    dir_word = "Over"
-                                    is_basketball_fade = True
-
                                 opening_over = first_prematch.get("row1")
                                 opening_line = first_prematch.get("row2")
                                 opening_under = first_prematch.get("row3")
@@ -426,10 +421,9 @@ class PredictionEngine:
                                 if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
                                     continue
                                     
-                                # FILTER D: Require Odds Movement — the odds must have actually dropped below their opening price
-                                if not is_basketball_fade:
-                                    if relevant_opening_odds is not None and relevant_live_odds >= relevant_opening_odds:
-                                        continue
+                                # FILTER D: Require Odds Movement — odds must have dropped below their opening price
+                                if relevant_opening_odds is not None and relevant_live_odds >= relevant_opening_odds:
+                                    continue
 
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
                                 if live_line is not None and live_line > 0:
@@ -438,7 +432,7 @@ class PredictionEngine:
                                         pace_ratio = current_total / live_line
                                         if dir_word == "Over":
                                             # Current total must already be at least 60% of line
-                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60 and not is_basketball_fade:
+                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
                                                 continue
                                             # For Soccer: current goal rate must project to at least 80% of line by 90'
                                             if sport_id == config.SPORT_SOCCER:
@@ -447,9 +441,8 @@ class PredictionEngine:
                                                 if projected_goals < live_line * 0.80:
                                                     continue
                                         elif dir_word == "Under":
-                                            # For Under: current pace must realistically end below line
-                                            # Current total must be <= 70% of line (still safely under)
-                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.70 and not is_basketball_fade:
+                                            # For Under: current total must be <= 70% of line (still safely under)
+                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.70:
                                                 continue
                                     except (ZeroDivisionError, TypeError, NameError):
                                         pass
