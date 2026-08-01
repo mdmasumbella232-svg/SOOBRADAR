@@ -199,28 +199,7 @@ def scan_game(sport_id, game, odds_markets):
                             "minute": "Early", "live_score": "0-0",
                             "final_score": final_score, "final_home": final_home, "final_away": final_away,
                         })
-                
-                if open_line in [3.00, 3.25, 3.50] and live_line is not None:
-                    if live_line == open_line:
-                        triggers.append({
-                            "sport": sport_name, "market": "Total", "prediction": f"Over {live_line}",
-                            "label": f"Soccer Rule 3 (Stale Line Over): Line stayed at {live_line}",
-                            "minute": "Early", "live_score": "0-0",
-                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
-                        })
-            
-            if open_home <= 1.30 or open_away <= 1.30:
-                ah_line = p_ah.get("row2")
-                if ah_line is not None and abs(ah_line) >= 1.75:
-                    open_line = p_tot.get("row2")
-                    live_line = l_tot.get("row2")
-                    if open_line is not None and open_line >= 3.75:
-                        triggers.append({
-                            "sport": sport_name, "market": "Total", "prediction": f"Over {live_line}",
-                            "label": f"Soccer Rule 2 (Blowout Over): Massive favorite, line {open_line}",
-                            "minute": "Early", "live_score": "0-0",
-                            "final_score": final_score, "final_home": final_home, "final_away": final_away,
-                        })
+            # Soccer Rule 2 (Blowout Over) and Rule 3 (Stale Line Over) REMOVED — poor backtest performance
         
         elif sport_id == config.SPORT_BASKETBALL:
             if open_home <= 1.40 or open_away <= 1.40:
