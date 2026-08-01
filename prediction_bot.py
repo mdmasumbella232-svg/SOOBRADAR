@@ -751,6 +751,7 @@ def main():
                         match_cache[event_id] = state_key
                         
                         odds_data = client.get_game_odds(sport_id, event_id)
+                        time.sleep(1.5)  # Throttle to prevent IP ban
                         if not odds_data:
                             continue
                         
