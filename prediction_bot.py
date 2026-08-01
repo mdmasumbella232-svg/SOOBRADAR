@@ -259,33 +259,35 @@ class PredictionEngine:
                     if open_home <= 1.40 or open_away <= 1.40:
                         fav_pred = "1" if open_home <= 1.40 else "2"
                         fav_odds = open_home if open_home <= 1.40 else open_away
-                        predictions.append({
-                            "market": "1X2", "prediction": fav_pred, "confidence": 99,
-                            "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
-                            "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                            "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
-                            "reason": f"Basketball Rule 1: Heavy Favorite Lock. Backing {fav_pred} at opening odds {fav_odds}."
-                        })
+                        # Live odds of favorite must be within acceptable bet range
+                        live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
+                        if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
+                            predictions.append({
+                                "market": "1X2", "prediction": fav_pred, "confidence": 99,
+                                "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
+                                "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
+                                "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
+                                "reason": f"Basketball Rule 1: Heavy Favorite Lock. Backing {fav_pred} at live odds {live_fav_odds}."
+                            })
                         
                     # RULE 2: Sharp Favorite Surge (Basketball)
                     if 1.50 <= open_home <= 2.50 and 1.50 <= open_away <= 2.50:
                         open_ah = p_ah.get("row2")
                         live_ah = l_ah.get("row2")
                         if open_ah is not None and live_ah is not None:
-                            # Find which way the spread moved. A drop in spread (e.g. -4.5 to -5.5) means movement towards Home.
                             ah_diff = live_ah - open_ah
                             if abs(ah_diff) >= 1.0:
-                                # Example: Home opened -4.5, live is -5.5 (diff = -1.0, means Home is more favored)
-                                # Example: Home opened +4.5, live is +3.5 (diff = -1.0, means Home is more favored)
-                                # So negative diff favors Home. Positive diff favors Away.
                                 fav_pred = "1" if ah_diff <= -1.0 else "2"
-                                predictions.append({
-                                    "market": "1X2", "prediction": fav_pred, "confidence": 90,
-                                    "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
-                                    "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                                    "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
-                                    "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts. Backing {fav_pred}."
-                                })
+                                live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
+                                # Live odds of favorite must be within acceptable bet range
+                                if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
+                                    predictions.append({
+                                        "market": "1X2", "prediction": fav_pred, "confidence": 90,
+                                        "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
+                                        "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
+                                        "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
+                                        "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts. Backing {fav_pred}."
+                                    })
 
         # If a new strategy triggered, return immediately to lock it
         if predictions:
