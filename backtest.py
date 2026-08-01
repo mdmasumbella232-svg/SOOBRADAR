@@ -17,10 +17,10 @@ except ImportError:
 from prediction_bot import InforadarAPIClient
 
 # ─── Configurable thresholds to test ───────────────────────────────────────
-ALG1_THRESHOLD     = 1.2   # Minimum Alg.1 peak rating to trigger a Total bet
-ODDS_DROP_PCT      = 25.0  # Minimum % odds drop to trigger a 1X2 bet
-MIN_ODDS           = 1.65
-MAX_ODDS           = 2.10
+ALG1_THRESHOLD     = config.MIN_ALG1_RATING_THRESHOLD
+ODDS_DROP_PCT      = config.ODDS_DROP_THRESHOLD_PCT
+MIN_ODDS           = config.MIN_ODDS
+MAX_ODDS           = config.MAX_ODDS
 SOCCER_LATE_CUTOFF = 75    # Ignore Soccer Total triggers after this minute
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -239,6 +239,43 @@ def scan_game(sport_id, game, odds_markets):
                     "final_score": final_score,
                     "final_home": final_home, "final_away": final_away,
                 })
+
+        # ── Strategy 3: Abnormal Line Dynamics (Soccer Halftime) ───────────────────────
+        if sport_id == config.SPORT_SOCCER and name == "Total":
+            for entry in odds_list:
+                gm = entry.get("game_time", 0) or 0
+                ss = entry.get("ss", "")
+                
+                # Check score is 0-0
+                h_now, a_now = parse_score(ss)
+                if h_now != 0 or a_now != 0:
+                    continue
+                
+                # Parse time
+                quarter, time_val = parse_quarter_and_seconds(gm)
+                is_ht = False
+                if str(gm).upper() == "HT":
+                    is_ht = True
+                elif time_val is not None and 40 <= time_val <= 55:
+                    is_ht = True
+                
+                if is_ht:
+                    opening_line = fp.get("row2")
+                    live_line = entry.get("row2")
+                    if opening_line is not None and live_line is not None and opening_line > 0:
+                        expected_ht_line = opening_line / 2.0
+                        if live_line >= (expected_ht_line + config.HT_ABNORMAL_LINE_GAP_THRESHOLD):
+                            live_over = entry.get("row1")
+                            if live_over is not None and MIN_ODDS <= live_over <= MAX_ODDS:
+                                triggers.append({
+                                    "sport": sport_name, "market": "Total",
+                                    "prediction": f"Over {live_line}",
+                                    "label": f"Anomaly at HT (line {live_line} vs expected {expected_ht_line})",
+                                    "minute": gm, "live_score": ss,
+                                    "final_score": final_score,
+                                    "final_home": final_home, "final_away": final_away,
+                                })
+                                break
 
     return triggers
 
