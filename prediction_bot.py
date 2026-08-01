@@ -260,7 +260,7 @@ class PredictionEngine:
                             })
 
             # --- STRATEGY 2: Rating-based (Alg.1) Deviation ---
-            # Block Over bets in Soccer after 75th minute (too late, too volatile)
+            # FILTER A: Block Soccer Totals after 75th minute (too late, pace unreliable)
             soccer_late_game = False
             if sport_id == config.SPORT_SOCCER:
                 try:
@@ -269,37 +269,72 @@ class PredictionEngine:
                         soccer_late_game = True
                 except (ValueError, TypeError):
                     pass
-            if market_name == "Total" and not soccer_late_game:
+
+            # FILTER B: Block Basketball Q4 Total bets entirely (too volatile/late)
+            basketball_q4 = False
+            if sport_id == config.SPORT_BASKETBALL:
+                try:
+                    q_val = int(match.get("time", {}).get("q", 0))
+                    if q_val >= 4:
+                        basketball_q4 = True
+                except (ValueError, TypeError):
+                    pass
+
+            if market_name == "Total" and not soccer_late_game and not basketball_q4:
                 ratings = latest_live.get("rating", [])
                 if ratings and isinstance(ratings, list) and len(ratings) > 0:
                     rating_detail = ratings[0]
                     if isinstance(rating_detail, dict):
                         rating_val = rating_detail.get("rating")
                         direction = rating_detail.get("direction")
-                        
+
                         if rating_val is not None:
                             abs_rating = abs(rating_val)
                             if abs_rating >= 1.2:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
-                                
+
                                 opening_over = first_prematch.get("row1")
                                 opening_line = first_prematch.get("row2")
                                 opening_under = first_prematch.get("row3")
-                                
+
                                 live_over = latest_live.get("row1")
                                 live_line = latest_live.get("row2")
                                 live_under = latest_live.get("row3")
-                                
+
                                 # Determine the relevant live odds for the predicted direction
                                 relevant_live_odds = live_over if dir_word == "Over" else live_under
-                                
+
                                 # Enforce odds range filter — skip if outside 1.65–2.10
                                 if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
                                     continue
-                                
+
+                                # FILTER C: Score Feasibility — current score must be on pace for the bet
+                                if live_line is not None and live_line > 0:
+                                    try:
+                                        current_total = home_score + away_score
+                                        pace_ratio = current_total / live_line
+                                        if dir_word == "Over":
+                                            # Current total must already be at least 60% of line
+                                            # e.g. for line 187.5, current total must be >= 112 already
+                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
+                                                continue
+                                            # For Soccer: current goal rate must project to at least 80% of line by 90'
+                                            if sport_id == config.SPORT_SOCCER:
+                                                match_min_safe = max(1, match_min if 'match_min' in dir() else 1)
+                                                projected_goals = (current_total / match_min_safe) * 90
+                                                if projected_goals < live_line * 0.80:
+                                                    continue
+                                        elif dir_word == "Under":
+                                            # For Under: current pace must realistically end below line
+                                            # Current total must be <= 70% of line (still safely under)
+                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.70:
+                                                continue
+                                    except (ZeroDivisionError, TypeError, NameError):
+                                        pass
+
                                 line_diff = live_line - opening_line if live_line is not None and opening_line is not None else 0.0
                                 confidence = min(99, int(70 + (abs_rating - config.MIN_ALG1_RATING_THRESHOLD) * 10))
-                                
+
                                 predictions.append({
                                     "market": market_name,
                                     "prediction": f"{dir_word} {live_line}",
