@@ -181,6 +181,149 @@ class PredictionEngine:
         except Exception:
             pass
 
+        # Pre-parse markets for cross-market strategies
+        parsed_markets = {}
+        for market in odds_markets:
+            m_name = market.get("name", "")
+            m_odds = market.get("odds", [])
+            m_first = market.get("firstPrematch", {})
+            if m_odds and isinstance(m_odds, list):
+                parsed_markets[m_name] = {
+                    "first": m_first,
+                    "latest": m_odds[0]
+                }
+
+        # --- MULTI-MARKET / EARLY LIVE STRATEGIES (New Rules) ---
+        time_info = match.get("time", {})
+        match_minute = 0
+        is_early = False
+        
+        # Determine if early live (0 to 10 minutes)
+        if sport_id == config.SPORT_SOCCER:
+            tm_str = str(time_info.get("tm", ""))
+            try:
+                match_minute = int(tm_str)
+                if 0 <= match_minute <= 10:
+                    is_early = True
+            except ValueError:
+                pass
+        elif sport_id == config.SPORT_BASKETBALL:
+            q_str = str(time_info.get("q", ""))
+            tm_str = str(time_info.get("tm", ""))
+            # Assuming Q1 and time is around 10-12 mins left (varies by league, but we use early Q1)
+            # Or we can just check if score is very low (e.g., total < 15)
+            if q_str == "1" and (home_score + away_score) < 15:
+                is_early = True
+
+        if is_early:
+            # Get 1X2
+            m_1x2 = parsed_markets.get("1X2", {})
+            p_1x2 = m_1x2.get("first", {})
+            l_1x2 = m_1x2.get("latest", {})
+            
+            # Get Total
+            m_total = parsed_markets.get("Total", {})
+            p_tot = m_total.get("first", {})
+            l_tot = m_total.get("latest", {})
+            
+            # Get Handicap (Asian Handicap / Spread)
+            m_ah = parsed_markets.get("Handicap", {}) or parsed_markets.get("Asian Handicap", {})
+            p_ah = m_ah.get("first", {})
+            l_ah = m_ah.get("latest", {})
+            
+            # Extract opening 1X2 odds
+            open_home = p_1x2.get("row1")
+            open_away = p_1x2.get("row3")
+            
+            if sport_id == config.SPORT_SOCCER:
+                if open_home and open_away:
+                    # RULE 1: Competitive Under (Soccer)
+                    if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
+                        open_line = p_tot.get("row2")
+                        live_line = l_tot.get("row2")
+                        if open_line in [3.25, 3.50] and live_line is not None:
+                            if live_line == open_line - 0.25:
+                                predictions.append({
+                                    "market": "Total", "prediction": f"Under {live_line}", "confidence": 95,
+                                    "total_dir": "Under", "total_line": f"{live_line}",
+                                    "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "-0.25",
+                                    "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
+                                    "alg_val": "Comp_Under", "alg_dir": "Under",
+                                    "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line}."
+                                })
+                    
+                    # RULE 2: Blowout Over (Soccer)
+                    if open_home <= 1.30 or open_away <= 1.30:
+                        ah_line = p_ah.get("row2")
+                        if ah_line is not None:
+                            # Handicap is usually negative for the favorite (e.g. -2.00)
+                            # We check if absolute handicap is >= 1.75
+                            if abs(ah_line) >= 1.75:
+                                open_line = p_tot.get("row2")
+                                live_line = l_tot.get("row2")
+                                if open_line is not None and open_line >= 3.75:
+                                    predictions.append({
+                                        "market": "Total", "prediction": f"Over {live_line}", "confidence": 95,
+                                        "total_dir": "Over", "total_line": f"{live_line}",
+                                        "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "N/A",
+                                        "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
+                                        "alg_val": "Blowout_Over", "alg_dir": "Over",
+                                        "reason": f"Soccer Rule 2: Blowout Over pattern triggered. Massive favorite, High Total."
+                                    })
+                                    
+                    # RULE 3: Stale Line Over (Soccer)
+                    if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
+                        open_line = p_tot.get("row2")
+                        live_line = l_tot.get("row2")
+                        if open_line in [3.00, 3.25, 3.50] and live_line is not None:
+                            if live_line == open_line:
+                                predictions.append({
+                                    "market": "Total", "prediction": f"Over {live_line}", "confidence": 80,
+                                    "total_dir": "Over", "total_line": f"{live_line}",
+                                    "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "0.0",
+                                    "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
+                                    "alg_val": "Stale_Over", "alg_dir": "Over",
+                                    "reason": f"Soccer Rule 3: Stale Line Over pattern triggered. Line untouched at {open_line}."
+                                })
+            
+            elif sport_id == config.SPORT_BASKETBALL:
+                if open_home and open_away:
+                    # RULE 1: Heavy Favorite Lock (Basketball)
+                    if open_home <= 1.40 or open_away <= 1.40:
+                        fav_pred = "1" if open_home <= 1.40 else "2"
+                        fav_odds = open_home if open_home <= 1.40 else open_away
+                        predictions.append({
+                            "market": "1X2", "prediction": fav_pred, "confidence": 99,
+                            "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
+                            "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
+                            "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
+                            "reason": f"Basketball Rule 1: Heavy Favorite Lock. Backing {fav_pred} at opening odds {fav_odds}."
+                        })
+                        
+                    # RULE 2: Sharp Favorite Surge (Basketball)
+                    if 1.50 <= open_home <= 2.50 and 1.50 <= open_away <= 2.50:
+                        open_ah = p_ah.get("row2")
+                        live_ah = l_ah.get("row2")
+                        if open_ah is not None and live_ah is not None:
+                            # Find which way the spread moved. A drop in spread (e.g. -4.5 to -5.5) means movement towards Home.
+                            ah_diff = live_ah - open_ah
+                            if abs(ah_diff) >= 1.0:
+                                # Example: Home opened -4.5, live is -5.5 (diff = -1.0, means Home is more favored)
+                                # Example: Home opened +4.5, live is +3.5 (diff = -1.0, means Home is more favored)
+                                # So negative diff favors Home. Positive diff favors Away.
+                                fav_pred = "1" if ah_diff <= -1.0 else "2"
+                                predictions.append({
+                                    "market": "1X2", "prediction": fav_pred, "confidence": 90,
+                                    "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
+                                    "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
+                                    "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
+                                    "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts. Backing {fav_pred}."
+                                })
+
+        # If a new strategy triggered, return immediately to lock it
+        if predictions:
+            return predictions
+
         for market in odds_markets:
             market_name = market.get("name", "")
             odds_list = market.get("odds", [])
