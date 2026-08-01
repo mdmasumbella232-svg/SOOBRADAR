@@ -302,6 +302,12 @@ def scan_game(sport_id, game, odds_markets):
                 live_under = peak_entry.get("row3")
 
                 dir_word = direction if direction else ("Over" if alg_val > 0 else "Under")
+                
+                is_basketball_fade = False
+                if sport_id == config.SPORT_BASKETBALL and dir_word == "Under":
+                    dir_word = "Over"
+                    is_basketball_fade = True
+                    
                 live_odds = live_over if dir_word == "Over" else live_under
                 opening_odds = fp.get("row1") if dir_word == "Over" else fp.get("row3")
 
@@ -309,8 +315,9 @@ def scan_game(sport_id, game, odds_markets):
                     continue
                     
                 # FILTER D: Require Odds Movement
-                if opening_odds is not None and live_odds >= opening_odds:
-                    continue
+                if not is_basketball_fade:
+                    if opening_odds is not None and live_odds >= opening_odds:
+                        continue
 
                 # Parse time info
                 quarter, time_val = parse_quarter_and_seconds(gm)
@@ -320,14 +327,16 @@ def scan_game(sport_id, game, odds_markets):
                 h_now, a_now = parse_score(ss)
                 current_total = (h_now + a_now) if h_now is not None and a_now is not None else 0
 
-                # Apply feasibility filter
-                if not is_feasible(dir_word, live_line, current_total, sport_id, quarter, soccer_minute):
-                    continue
+                # Apply feasibility filter — skip for basketball fade (score pace is intentionally inverted)
+                if not is_basketball_fade:
+                    if not is_feasible(dir_word, live_line, current_total, sport_id, quarter, soccer_minute):
+                        continue
 
+                fade_tag = " [FADE]" if is_basketball_fade else ""
                 triggers.append({
                     "sport": sport_name, "market": "Total",
                     "prediction": f"{dir_word} {live_line}",
-                    "label": f"Alg.1={alg_val:+.3f} at {gm} (line {fp.get('row2')}→{live_line})",
+                    "label": f"Alg.1={alg_val:+.3f} at {gm} (line {fp.get('row2')}→{live_line}){fade_tag}",
                     "minute": gm, "live_score": ss,
                     "final_score": final_score,
                     "final_home": final_home, "final_away": final_away,
