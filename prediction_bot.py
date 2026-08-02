@@ -458,21 +458,39 @@ class PredictionEngine:
                                 # FILTER E: Soccer Over — block goal-induced line movements
                                 # When goals are scored, the total line mechanically adjusts upward.
                                 # This is NOT a predictive signal — the market is just repricing.
-                                # Block when the line movement is roughly proportional to goals scored.
-                                # Threshold: line_diff must be >= 0.5*goals AND <= goals + 0.25
-                                # This blocks "line 2.75→3.75, goals=2" (1.0 >= 1.0) and "line 3→6.75, goals=6" (3.75 >= 3.0)
-                                # but NOT "line 3.5→3.75, goals=1" (0.25 < 0.5) — small moves are genuine signals
+                                # Three checks to catch goal-induced Over picks:
+                                #   Check 1: line_diff proportional to goals (original check)
+                                #   Check 2: goals-to-line ratio >= 0.5 (goals already cover 50%+ of line)
+                                #   Check 3: line above expected at current minute (line spiked then decayed)
                                 # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
                                     total_goals = latest_odds_home + latest_odds_away
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
-                                        # Block when line moved up proportional to goals (goal-induced repricing)
+                                        # Check 1: Block when line moved up proportional to goals (goal-induced repricing)
                                         # 0.5*goals threshold: with 2 goals, blocks if line_diff >= 1.0 (0.5 per goal)
                                         # With 1 goal, only blocks if line_diff >= 0.5 (significant movement)
                                         if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
                                             log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
                                             continue
+                                        # Check 2: Goals-to-line ratio — if 50%+ of the line is already goals,
+                                        # the line is high BECAUSE of the goals, not because market expects more.
+                                        # Example: Over 3.0 at 63' with 2-0 → 2/3.0 = 0.67 → BLOCKED
+                                        # Example: Over 2.5 at 30' with 1-0 → 1/2.5 = 0.40 → NOT BLOCKED
+                                        if live_line > 0 and (total_goals / live_line) >= 0.5:
+                                            log(f"[SKIP] Soccer Over blocked: goals-to-line ratio too high (goals={total_goals}, line={live_line}, ratio={total_goals/live_line:.2f})")
+                                            continue
+                                        # Check 3: Line above expected at current minute
+                                        # When goals are scored, the line spikes up then decays. The net change
+                                        # from opening may be small, but the line is still above expected.
+                                        # Example: line 2.75→4.0 (after 2 goals)→3.0 (at 63') → net +0.25
+                                        #   but expected at 63' = 2 + 2.75*27/90 = 2.825, line=3.0 → above expected
+                                        if match_minute is not None and match_minute > 0 and live_line > 0:
+                                            expected_remaining = opening_line * (90 - match_minute) / 90.0
+                                            expected_line = total_goals + expected_remaining
+                                            if live_line >= expected_line + 0.25:
+                                                log(f"[SKIP] Soccer Over blocked: line above expected at {match_minute}' (line={live_line}, expected={expected_line:.2f}, goals={total_goals})")
+                                                continue
                                     # Cap Soccer Over line at 4.50 — lines above this are extremely high
                                     # and almost always result from goal-induced adjustments
                                     # Raised from 3.75 to 4.50 for aggressive mode
@@ -674,6 +692,47 @@ class PredictionEngine:
                                         "alg_dir": "Over",
                                         "reason": f"Line rose sharply from {opening_line_s5} to {live_line_s5} (+{line_rise_s5:.2f}) with 0 goals scored. Market expects more goals."
                                     })
+
+            # --- STRATEGY 6: Slow Pace Under (0-0 at 30-70' with line >= 2.0) ---
+            # When the game is 0-0 deep into the match and the total line is still 2.0+,
+            # the market is pricing in goals that haven't materialized. The Under is a strong
+            # value play — the game has shown no scoring ability for 30+ minutes.
+            # Key: only trigger when NO goals have been scored (0-0 score).
+            if sport_id == config.SPORT_SOCCER and market_name == "Total" and not soccer_late_game:
+                opening_line_s6 = earliest_live.get("row2") or first_prematch.get("row2")
+                live_line_s6 = latest_live.get("row2")
+                live_under_s6 = latest_live.get("row3")
+                live_over_s6 = latest_live.get("row1")
+                # Only trigger when score is 0-0
+                if latest_odds_home == 0 and latest_odds_away == 0:
+                    try:
+                        s6_minute = int(match.get("time", {}).get("tm", 0))
+                    except (ValueError, TypeError):
+                        s6_minute = 0
+                    if 30 <= s6_minute <= 70:
+                        if (live_line_s6 is not None and live_line_s6 >= 2.0
+                                and live_under_s6 is not None
+                                and config.MIN_ODDS <= live_under_s6 <= config.MAX_ODDS):
+                            # Check we haven't already picked this from Strategy 2 or 4
+                            already_picked = any(p.get("total_dir") == "Under" and p.get("total_line") == f"{live_line_s6}" for p in predictions)
+                            if not already_picked:
+                                predictions.append({
+                                    "market": market_name,
+                                    "prediction": f"Under {live_line_s6}",
+                                    "confidence": 86,
+                                    "total_dir": "Under",
+                                    "total_line": f"{live_line_s6}",
+                                    "open_line": f"{opening_line_s6}" if opening_line_s6 is not None else "N/A",
+                                    "now_line": f"{live_line_s6}",
+                                    "line_diff": f"{live_line_s6 - opening_line_s6:+.2f}" if opening_line_s6 is not None else "N/A",
+                                    "open_over": f"{earliest_live.get('row1', 0):.2f}" if earliest_live.get('row1') else "N/A",
+                                    "now_over": f"{live_over_s6:.2f}" if live_over_s6 else "N/A",
+                                    "open_under": f"{earliest_live.get('row3', 0):.2f}" if earliest_live.get('row3') else "N/A",
+                                    "now_under": f"{live_under_s6:.2f}",
+                                    "alg_val": "Slow_Pace",
+                                    "alg_dir": "Under",
+                                    "reason": f"0-0 at {s6_minute}' with line {live_line_s6}. No scoring for 30+ minutes — market overpricing goals."
+                                })
 
         return predictions
 
