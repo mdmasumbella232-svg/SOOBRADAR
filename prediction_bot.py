@@ -293,15 +293,27 @@ class PredictionEngine:
                         # Live odds of favorite must be within acceptable bet range
                         live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
                         if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
+                            # Calculate proper drift and prob_shift
+                            open_fav = open_home if fav_pred == "1" else open_away
+                            open_other = open_away if fav_pred == "1" else open_home
+                            live_other = l_1x2.get("row3") if fav_pred == "1" else l_1x2.get("row1")
+                            drift_fav = live_fav_odds - open_fav if live_fav_odds and open_fav else None
+                            drift_other = live_other - open_other if live_other and open_other else None
+                            prob_shift_fav = ((1.0/live_fav_odds) - (1.0/open_fav)) * 100 if live_fav_odds and open_fav else None
+                            confidence = min(99, int(85 + (1.40 - fav_odds) * 20))  # Lower odds = higher confidence
                             predictions.append({
-                                "market": "1X2", "prediction": fav_pred, "confidence": 99,
+                                "market": "1X2", "prediction": fav_pred, "confidence": confidence,
                                 "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
                                 "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                                "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
+                                "drift_1": f"{drift_fav:+.2f}" if drift_fav is not None else "N/A",
+                                "drift_x": "N/A",
+                                "drift_2": f"{drift_other:+.2f}" if drift_other is not None else "N/A",
+                                "prob_shift": f"{prob_shift_fav:+.1f}" if prob_shift_fav is not None else "N/A",
                                 "reason": f"Basketball Rule 1: Heavy Favorite Lock. Backing {fav_pred} at live odds {live_fav_odds}."
                             })
                         
                     # RULE 2: Sharp Favorite Surge (Basketball)
+                    # Requires: Handicap movement AND 1X2 odds movement confirmation
                     if 1.50 <= open_home <= 2.50 and 1.50 <= open_away <= 2.50:
                         open_ah = p_ah.get("row2")
                         live_ah = l_ah.get("row2")
@@ -310,15 +322,28 @@ class PredictionEngine:
                             if abs(ah_diff) >= 1.0:
                                 fav_pred = "1" if ah_diff <= -1.0 else "2"
                                 live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
+                                open_fav_odds = open_home if fav_pred == "1" else open_away
                                 # Live odds of favorite must be within acceptable bet range
                                 if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
-                                    predictions.append({
-                                        "market": "1X2", "prediction": fav_pred, "confidence": 90,
-                                        "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
-                                        "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                                        "drift_1": "N/A", "drift_x": "N/A", "drift_2": "N/A", "prob_shift": "N/A",
-                                        "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts. Backing {fav_pred}."
-                                    })
+                                    # CONFIRMATION: 1X2 odds must have moved (dropped) for the favorite
+                                    if open_fav_odds is not None and live_fav_odds < open_fav_odds:
+                                        # Calculate proper drift and prob_shift
+                                        open_other = open_away if fav_pred == "1" else open_home
+                                        live_other = l_1x2.get("row3") if fav_pred == "1" else l_1x2.get("row1")
+                                        drift_fav = live_fav_odds - open_fav_odds
+                                        drift_other = live_other - open_other if live_other and open_other else None
+                                        prob_shift_fav = ((1.0/live_fav_odds) - (1.0/open_fav_odds)) * 100
+                                        confidence = min(95, int(75 + abs(ah_diff) * 5))
+                                        predictions.append({
+                                            "market": "1X2", "prediction": fav_pred, "confidence": confidence,
+                                            "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
+                                            "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
+                                            "drift_1": f"{drift_fav:+.2f}" if fav_pred == "1" else (f"{drift_other:+.2f}" if drift_other is not None else "N/A"),
+                                            "drift_x": "N/A",
+                                            "drift_2": f"{drift_other:+.2f}" if fav_pred == "2" else (f"{drift_fav:+.2f}" if drift_fav is not None else "N/A"),
+                                            "prob_shift": f"{prob_shift_fav:+.1f}",
+                                            "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts, 1X2 odds confirm. Backing {fav_pred}."
+                                        })
 
         # If a new strategy triggered, return immediately to lock it
         if predictions:
@@ -413,17 +438,17 @@ class PredictionEngine:
                 except (ValueError, TypeError):
                     pass
 
-            # FILTER B: Block Basketball Q4 Total bets entirely (too volatile/late)
-            basketball_q4 = False
+            # FILTER B: Block Basketball Q3+Q4 Total bets (too volatile/late)
+            basketball_late = False
             if sport_id == config.SPORT_BASKETBALL:
                 try:
                     q_val = int(match.get("time", {}).get("q", 0))
-                    if q_val >= 4:
-                        basketball_q4 = True
+                    if q_val >= 3:
+                        basketball_late = True
                 except (ValueError, TypeError):
                     pass
 
-            if market_name == "Total" and not soccer_late_game and not basketball_q4:
+            if market_name == "Total" and not soccer_late_game and not basketball_late:
                 ratings = latest_live.get("rating", [])
                 if ratings and isinstance(ratings, list) and len(ratings) > 0:
                     rating_detail = ratings[0]
@@ -473,8 +498,9 @@ class PredictionEngine:
                                                 if projected_goals < live_line * 0.80:
                                                     continue
                                         elif dir_word == "Under":
-                                            # For Under: current total must be <= 70% of line (still safely under)
-                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.70:
+                                            # For Under: current total must be <= 55% of line (still safely under)
+                                            # Stricter threshold (was 70%) — Q3+ games already blocked above
+                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.55:
                                                 continue
                                     except (ZeroDivisionError, TypeError, NameError):
                                         pass
@@ -932,6 +958,13 @@ def main():
                         # Do not bet on games that are finished, cancelled, or in final transition
                         time_status = str(game.get("timeStatus", ""))
                         if time_status in ["3", "4", "99", "10"]:
+                            continue
+                        
+                        # FILTER: Skip low-stakes / exhibition leagues (unpredictable, poor data quality)
+                        league_name = str(game.get("league", {}).get("name", "")).lower()
+                        skip_leagues = ["friendly", "friendlies", "exhibition", "tournament", "cup friendly"]
+                        if any(skip_word in league_name for skip_word in skip_leagues):
+                            log(f"[SKIP] Skipping low-stakes league: {game.get('league', {}).get('name', '?')}")
                             continue
                             
                         # Prevent betting on games in the absolute final moments (API ghost lines)
