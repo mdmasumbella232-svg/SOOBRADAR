@@ -946,6 +946,11 @@ def main():
     
     # Cache to store match states to avoid redundant odds fetches
     match_cache = {}
+    
+    # Consecutive failure counter — auto-restart if API is unreachable for too long
+    # When consecutive_failures >= threshold, bot exits and Render restarts it with a fresh IP
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 5  # 5 cycles × 60s = ~5 minutes of total failure → restart
 
     while True:
         try:
@@ -1089,11 +1094,15 @@ def main():
                 
             else:
                 # Normal live scanning
+                any_games_found = False
                 for sport_id in [config.SPORT_SOCCER, config.SPORT_BASKETBALL]:
                     sport_name = "Soccer" if sport_id == config.SPORT_SOCCER else "Basketball"
                     live_games = client.get_live_games(sport_id)
                     
                     log(f"[Status: UNLOCKED] Scanned {len(live_games)} live {sport_name} games.")
+                    
+                    if live_games:
+                        any_games_found = True
                     
                     for game in live_games:
                         # Re-verify lock state inside loop in case it got locked in this iteration
@@ -1175,9 +1184,26 @@ def main():
             # Prevent cache growing too large
             if len(match_cache) > config.MAX_CACHE_SIZE:
                 match_cache.clear()
+            
+            # --- AUTO-RESTART LOGIC ---
+            # If we found games or are locked, reset the failure counter
+            lock_state = load_lock_state()
+            if lock_state.get("locked") or any_games_found:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                log(f"[CONNECT] No games found. Consecutive failures: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}")
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    log(f"[RESTART] {consecutive_failures} consecutive failures. Exiting to trigger Render auto-restart with fresh IP...", error=True)
+                    time.sleep(5)  # Give logs time to flush
+                    sys.exit(1)  # Render will auto-restart the process
                 
         except Exception as e:
             log(f"Error in main loop: {e}\n{traceback.format_exc()}", error=True)
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                log(f"[RESTART] {consecutive_failures} consecutive failures (including errors). Exiting for auto-restart...", error=True)
+                sys.exit(1)
             
         time.sleep(config.POLL_INTERVAL_SECONDS)
 
