@@ -83,16 +83,18 @@ class ProxyManager:
                 return False
 
     def get_opener(self):
-        """Build a per-request opener with the current proxy, or a plain opener if no proxy."""
+        """Build a per-request opener with the current proxy and SSL context.
+        HTTPSHandler is used to embed the ssl_ctx so opener.open() doesn't need context= kwarg."""
         with self._lock:
+            https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
             if self.current_proxy:
                 proxy_handler = urllib.request.ProxyHandler({
                     'http': f"http://{self.current_proxy}",
                     'https': f"http://{self.current_proxy}"
                 })
-                return urllib.request.build_opener(proxy_handler)
+                return urllib.request.build_opener(proxy_handler, https_handler)
             else:
-                return urllib.request.build_opener()
+                return urllib.request.build_opener(https_handler)
 
 proxy_manager = ProxyManager()
 
@@ -120,9 +122,9 @@ class InforadarAPIClient:
         
         for attempt in range(self.max_retries + 1):
             try:
-                # Use per-request opener with proxy if available
+                # Use per-request opener with proxy if available (SSL context is baked into the opener)
                 opener = proxy_manager.get_opener()
-                with opener.open(req, context=ssl_ctx, timeout=config.REQUEST_TIMEOUT_SECONDS) as response:
+                with opener.open(req, timeout=config.REQUEST_TIMEOUT_SECONDS) as response:
                     if response.status == 200:
                         self.consecutive_errors = 0
                         return json.loads(response.read().decode('utf-8'))
