@@ -41,32 +41,49 @@ STATS_FILE = "stats.json"
 
 class ProxyManager:
     def __init__(self):
-        self.proxy_list = [
-            "ldhodkni:26yc0qmuu0gg@31.59.20.176:6754",
-            "ldhodkni:26yc0qmuu0gg@31.56.127.193:7684",
-            "ldhodkni:26yc0qmuu0gg@45.38.107.97:6014",
-            "ldhodkni:26yc0qmuu0gg@198.105.121.200:6462",
-            "ldhodkni:26yc0qmuu0gg@64.137.96.74:6641",
-            "ldhodkni:26yc0qmuu0gg@198.23.243.226:6361",
-            "ldhodkni:26yc0qmuu0gg@38.154.185.97:6370",
-            "ldhodkni:26yc0qmuu0gg@84.247.60.125:6095",
-            "ldhodkni:26yc0qmuu0gg@142.111.67.146:5611",
-            "ldhodkni:26yc0qmuu0gg@191.96.254.138:6185"
-        ]
+        self.proxies = []
         self.current_proxy = None
+        self.proxy_api_url = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
+
+    def fetch_proxies(self):
+        try:
+            req = urllib.request.Request(self.proxy_api_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as response:
+                text = response.read().decode('utf-8')
+                # Filter for HTTP proxies and strip the 'http://' prefix for urllib compat
+                self.proxies = [
+                    p.strip().replace("http://", "") 
+                    for p in text.split('\n') 
+                    if p.strip().startswith("http://")
+                ]
+                log(f"[PROXY] Fetched {len(self.proxies)} HTTP proxies from iplocate GitHub.")
+        except Exception as e:
+            log(f"[PROXY] Failed to fetch iplocate proxies: {e}", error=True)
+            self.proxies = []
 
     def rotate_proxy(self):
-        import random
-        self.current_proxy = random.choice(self.proxy_list)
-        log(f"[PROXY] Routing traffic through Webshare Proxy: {self.current_proxy.split('@')[1]}")
+        if not self.proxies:
+            self.fetch_proxies()
         
-        proxy_handler = urllib.request.ProxyHandler({
-            'http': f"http://{self.current_proxy}",
-            'https': f"http://{self.current_proxy}"
-        })
-        opener = urllib.request.build_opener(proxy_handler)
-        urllib.request.install_opener(opener)
-        return True
+        if self.proxies:
+            import random
+            self.current_proxy = random.choice(self.proxies)
+            self.proxies.remove(self.current_proxy)
+            log(f"[PROXY] Rotating to new iplocate proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
+            
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': f"http://{self.current_proxy}",
+                'https': f"http://{self.current_proxy}"
+            })
+            opener = urllib.request.build_opener(proxy_handler)
+            urllib.request.install_opener(opener)
+            return True
+        else:
+            log("[PROXY] No proxies available. Reverting to direct connection.")
+            self.current_proxy = None
+            opener = urllib.request.build_opener()
+            urllib.request.install_opener(opener)
+            return False
 
 proxy_manager = ProxyManager()
 
