@@ -41,44 +41,20 @@ STATS_FILE = "stats.json"
 
 class ProxyManager:
     def __init__(self):
-        self.proxies = []
-        self.current_proxy = None
-        self.proxy_api_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all"
-
-    def fetch_proxies(self):
-        try:
-            req = urllib.request.Request(self.proxy_api_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as response:
-                text = response.read().decode('utf-8')
-                self.proxies = [p.strip() for p in text.split('\n') if p.strip()]
-                log(f"[PROXY] Fetched {len(self.proxies)} free proxies from ProxyScrape.")
-        except Exception as e:
-            log(f"[PROXY] Failed to fetch proxies: {e}", error=True)
-            self.proxies = []
+        # Webshare authenticated proxy
+        self.webshare_proxy = "ldhodkni:26yc0qmuu0gg@p.webshare.io:80"
+        self.current_proxy = self.webshare_proxy
 
     def rotate_proxy(self):
-        if not self.proxies:
-            self.fetch_proxies()
+        log(f"[PROXY] Routing traffic through Webshare Proxy: p.webshare.io:80")
         
-        if self.proxies:
-            import random
-            self.current_proxy = random.choice(self.proxies)
-            self.proxies.remove(self.current_proxy)
-            log(f"[PROXY] Rotating to new proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
-            
-            proxy_handler = urllib.request.ProxyHandler({
-                'http': f"http://{self.current_proxy}",
-                'https': f"http://{self.current_proxy}"
-            })
-            opener = urllib.request.build_opener(proxy_handler)
-            urllib.request.install_opener(opener)
-            return True
-        else:
-            log("[PROXY] No proxies available. Reverting to direct connection.")
-            self.current_proxy = None
-            opener = urllib.request.build_opener()
-            urllib.request.install_opener(opener)
-            return False
+        proxy_handler = urllib.request.ProxyHandler({
+            'http': f"http://{self.webshare_proxy}",
+            'https': f"http://{self.webshare_proxy}"
+        })
+        opener = urllib.request.build_opener(proxy_handler)
+        urllib.request.install_opener(opener)
+        return True
 
 proxy_manager = ProxyManager()
 
