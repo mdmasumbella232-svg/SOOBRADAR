@@ -16,8 +16,8 @@ SPORT_BASKETBALL = 18
 
 # Prediction Logic Tuning Parameters
 # === STRATEGY & RISK PARAMETERS ===
-MIN_ODDS = 1.55             # Minimum acceptable odds for any bet (widened from 1.65)
-MAX_ODDS = 2.20             # Maximum acceptable odds for any bet (widened from 2.10)
+MIN_ODDS = 1.65             # Minimum acceptable odds for any bet
+MAX_ODDS = 2.10             # Maximum acceptable odds for any bet
 
 # Strategy 1 (1X2 Drop) — DISABLED: bot only picks Total Over/Under
 # ODDS_DROP_THRESHOLD_PCT = 20.0  # No longer used
