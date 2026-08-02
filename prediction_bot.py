@@ -574,10 +574,13 @@ class PredictionEngine:
                                     "reason": f"0-0 at HT, but line is abnormally high ({live_line} vs expected {expected_ht_line})."
                                 })
 
-            # --- STRATEGY 4: Sharp Under (Line drops significantly without goal cause) ---
-            # When the Total line drops 0.5+ during live play and the current score is LOW,
-            # the market is signaling fewer goals than expected. This is a strong Under signal.
-            # Key: only trigger when goals are NOT causing the drop (not goal-induced).
+            # --- STRATEGY 4: Sharp Under (Line is BELOW expected time-adjusted line) ---
+            # When the live Total line is significantly below the expected line at the current minute,
+            # the market is signaling fewer goals than the time-adjusted expectation.
+            # KEY FIX: Compare live line to EXPECTED line (accounting for time decay), not opening line.
+            # Normal time decay: line at 58' with 0-0 should be ~1.07 from opening 3.00.
+            # A "sharp" signal is when the live line is 0.5+ BELOW the expected line.
+            # Expected line = current_goals + (opening_line * (90 - minute) / 90)
             if sport_id == config.SPORT_SOCCER and market_name == "Total" and not soccer_late_game:
                 opening_line_s4 = earliest_live.get("row2") or first_prematch.get("row2")
                 live_line_s4 = latest_live.get("row2")
@@ -585,15 +588,24 @@ class PredictionEngine:
                 live_over_s4 = latest_live.get("row1")
                 if (opening_line_s4 is not None and live_line_s4 is not None
                         and live_under_s4 is not None
-                        and config.MIN_ODDS <= live_under_s4 <= config.MAX_ODDS):
-                    line_drop_s4 = opening_line_s4 - live_line_s4
-                    if line_drop_s4 >= 0.5:
-                        # Check: not goal-induced — current goals must be less than the line drop
-                        total_goals_s4 = latest_odds_home + latest_odds_away
-                        if total_goals_s4 < line_drop_s4:
-                            # Only trigger if game is not too late (already have FILTER A for 75+)
-                            # Also check: Under pace is feasible (current total < live line)
-                            if latest_odds_home + latest_odds_away < live_line_s4:
+                        and config.MIN_ODDS <= live_under_s4 <= config.MAX_ODDS
+                        and opening_line_s4 > 0):
+                    total_goals_s4 = latest_odds_home + latest_odds_away
+                    # Calculate expected line at current minute (time-adjusted)
+                    # Expected remaining goals = opening_line * (90 - minute) / 90
+                    # Expected live line = current_goals + expected_remaining_goals
+                    try:
+                        s4_minute = int(match.get("time", {}).get("tm", 0))
+                    except (ValueError, TypeError):
+                        s4_minute = 0
+                    if 10 <= s4_minute <= 74:  # Only in meaningful game time (not too early, not too late)
+                        expected_remaining = opening_line_s4 * (90 - s4_minute) / 90.0
+                        expected_line = total_goals_s4 + expected_remaining
+                        # The "sharp" signal: live line is 0.5+ below expected
+                        line_gap = expected_line - live_line_s4
+                        if line_gap >= 0.5:
+                            # Also check: not goal-induced — goals must be less than the gap
+                            if total_goals_s4 < line_gap:
                                 # Check we haven't already picked this from Strategy 2
                                 already_picked = any(p.get("total_dir") == "Under" and p.get("total_line") == f"{live_line_s4}" for p in predictions)
                                 if not already_picked:
@@ -612,7 +624,7 @@ class PredictionEngine:
                                         "now_under": f"{live_under_s4:.2f}",
                                         "alg_val": "Sharp_Under",
                                         "alg_dir": "Under",
-                                        "reason": f"Line dropped sharply from {opening_line_s4} to {live_line_s4} (-{line_drop_s4:.2f}) with only {total_goals_s4} goals. Market expects fewer goals."
+                                        "reason": f"Line {live_line_s4} is {line_gap:.2f} below expected {expected_line:.2f} at {s4_minute}' (opening {opening_line_s4}, goals {total_goals_s4}). Market expects fewer goals."
                                     })
 
             # --- STRATEGY 5: Momentum Over (Line rises significantly early in game) ---
