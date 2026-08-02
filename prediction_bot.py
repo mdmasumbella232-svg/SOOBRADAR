@@ -492,6 +492,23 @@ class PredictionEngine:
                                 if relevant_opening_odds is not None and relevant_live_odds >= relevant_opening_odds:
                                     continue
 
+                                # FILTER E: Soccer Over — block goal-induced line movements
+                                # When goals are scored, the total line mechanically adjusts upward.
+                                # This is NOT a predictive signal — the market is just repricing.
+                                # Only pick Over when the line movement exceeds what goals explain.
+                                if sport_id == config.SPORT_SOCCER and dir_word == "Over":
+                                    total_goals = home_score + away_score
+                                    if total_goals > 0 and opening_line is not None and live_line is not None:
+                                        line_diff_val = live_line - opening_line
+                                        if line_diff_val > 0 and line_diff_val <= total_goals + 0.25:
+                                            log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
+                                            continue
+                                    # Cap Soccer Over line at 3.75 — lines above this are extremely high
+                                    # and almost always result from goal-induced adjustments
+                                    if live_line is not None and live_line > 3.75:
+                                        log(f"[SKIP] Soccer Over blocked: line too high ({live_line} > 3.75)")
+                                        continue
+
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
                                 if live_line is not None and live_line > 0:
                                     try:
@@ -501,12 +518,13 @@ class PredictionEngine:
                                             # Current total must already be at least 60% of line
                                             if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
                                                 continue
-                                            # For Soccer: current goal rate must project to at least 80% of line by 90'
+                                            # For Soccer: current goal rate must project to at least 90% of line by 90'
+                                            # Raised from 80% — Over picks need strong pace confirmation
                                             if sport_id == config.SPORT_SOCCER:
                                                 # Use the match minute we already computed earlier
                                                 safe_minute = max(1, match_minute)
                                                 projected_goals = (current_total / safe_minute) * 90
-                                                if projected_goals < live_line * 0.80:
+                                                if projected_goals < live_line * 0.90:
                                                     continue
                                         elif dir_word == "Under":
                                             # For Under: current total must be <= 55% of line (still safely under)
