@@ -274,15 +274,24 @@ class PredictionEngine:
                     if 1.60 <= open_home <= 3.50 and 1.60 <= open_away <= 3.50:
                         open_line = p_tot.get("row2")
                         live_line = l_tot.get("row2")
-                        if open_line in [3.25, 3.50] and live_line is not None:
+                        # Check: game must have started (score must not be None)
+                        # Check: live Under odds must exist and be within acceptable range
+                        live_under_odds = l_tot.get("row3")
+                        if (open_line in [3.25, 3.50] and live_line is not None
+                                and scores is not None and str(scores) not in ["None", ""]
+                                and live_under_odds is not None
+                                and config.MIN_ODDS <= live_under_odds <= config.MAX_ODDS):
                             if live_line == open_line - 0.25:
                                 predictions.append({
                                     "market": "Total", "prediction": f"Under {live_line}", "confidence": 95,
                                     "total_dir": "Under", "total_line": f"{live_line}",
                                     "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": "-0.25",
-                                    "open_over": "N/A", "now_over": "N/A", "open_under": "N/A", "now_under": "N/A",
+                                    "open_over": f"{p_tot.get('row1', 'N/A')}" if p_tot.get('row1') else "N/A",
+                                    "now_over": f"{l_tot.get('row1', 'N/A')}" if l_tot.get('row1') else "N/A",
+                                    "open_under": f"{p_tot.get('row3', 'N/A')}" if p_tot.get('row3') else "N/A",
+                                    "now_under": f"{live_under_odds:.2f}",
                                     "alg_val": "Comp_Under", "alg_dir": "Under",
-                                    "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line}."
+                                    "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line}. Live Under odds: {live_under_odds:.2f}"
                                 })
                     # RULE 2 (Blowout Over) and RULE 3 (Stale Line Over) REMOVED — poor backtest performance
             
