@@ -6,6 +6,7 @@ import os
 import traceback
 import urllib.request
 import urllib.parse
+import threading
 from datetime import datetime
 try:
     import config
@@ -40,10 +41,14 @@ LOCK_FILE = "lock_state.json"
 STATS_FILE = "stats.json"
 
 class ProxyManager:
+    """Manages proxy rotation for API requests.
+    Uses per-request opener instead of global install_opener to avoid
+    interfering with other urllib calls (e.g. proxy list fetch itself)."""
     def __init__(self):
         self.proxies = []
         self.current_proxy = None
         self.proxy_api_url = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
+        self._lock = threading.Lock()
 
     def fetch_proxies(self):
         try:
@@ -62,34 +67,39 @@ class ProxyManager:
             self.proxies = []
 
     def rotate_proxy(self):
-        if not self.proxies:
-            self.fetch_proxies()
-        
-        if self.proxies:
-            import random
-            self.current_proxy = random.choice(self.proxies)
-            self.proxies.remove(self.current_proxy)
-            log(f"[PROXY] Rotating to new iplocate proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
+        with self._lock:
+            if not self.proxies:
+                self.fetch_proxies()
             
-            proxy_handler = urllib.request.ProxyHandler({
-                'http': f"http://{self.current_proxy}",
-                'https': f"http://{self.current_proxy}"
-            })
-            opener = urllib.request.build_opener(proxy_handler)
-            urllib.request.install_opener(opener)
-            return True
-        else:
-            log("[PROXY] No proxies available. Reverting to direct connection.")
-            self.current_proxy = None
-            opener = urllib.request.build_opener()
-            urllib.request.install_opener(opener)
-            return False
+            if self.proxies:
+                import random
+                self.current_proxy = random.choice(self.proxies)
+                self.proxies.remove(self.current_proxy)
+                log(f"[PROXY] Rotating to new iplocate proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
+                return True
+            else:
+                log("[PROXY] No proxies available. Using direct connection.")
+                self.current_proxy = None
+                return False
+
+    def get_opener(self):
+        """Build a per-request opener with the current proxy, or a plain opener if no proxy."""
+        with self._lock:
+            if self.current_proxy:
+                proxy_handler = urllib.request.ProxyHandler({
+                    'http': f"http://{self.current_proxy}",
+                    'https': f"http://{self.current_proxy}"
+                })
+                return urllib.request.build_opener(proxy_handler)
+            else:
+                return urllib.request.build_opener()
 
 proxy_manager = ProxyManager()
 
 
 class InforadarAPIClient:
-    """Lightweight client for inforadar.live API using standard library to minimize RAM/CPU usage."""
+    """Lightweight client for inforadar.live API using standard library to minimize RAM/CPU usage.
+    Includes retry logic with exponential backoff and per-request proxy support."""
     def __init__(self):
         self.base_url = config.BASE_URL.rstrip('/')
         self.api_root = config.API_ROOT.strip('/')
@@ -98,6 +108,8 @@ class InforadarAPIClient:
             'Accept': 'application/json'
         }
         self.consecutive_errors = 0
+        self.max_retries = 3  # Number of retries per request
+        self.retry_backoff_base = 2  # Seconds for first retry delay
 
     def _request(self, endpoint, params=None):
         url = f"{self.base_url}/{self.api_root}/{endpoint.lstrip('/')}"
@@ -105,20 +117,32 @@ class InforadarAPIClient:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         
         req = urllib.request.Request(url, headers=self.headers)
-        try:
-            with urllib.request.urlopen(req, context=ssl_ctx, timeout=config.REQUEST_TIMEOUT_SECONDS) as response:
-                if response.status == 200:
-                    self.consecutive_errors = 0
-                    return json.loads(response.read().decode('utf-8'))
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Use per-request opener with proxy if available
+                opener = proxy_manager.get_opener()
+                with opener.open(req, context=ssl_ctx, timeout=config.REQUEST_TIMEOUT_SECONDS) as response:
+                    if response.status == 200:
+                        self.consecutive_errors = 0
+                        return json.loads(response.read().decode('utf-8'))
+                    else:
+                        log(f"API Error: HTTP Status {response.status} for URL {url}", error=True)
+                        return None
+            except Exception as e:
+                self.consecutive_errors += 1
+                if attempt < self.max_retries:
+                    delay = self.retry_backoff_base * (2 ** attempt)  # 2, 4, 8 seconds...
+                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{self.max_retries+1}, retrying in {delay}s)", error=True)
+                    time.sleep(delay)
+                    continue
                 else:
-                    print(f"[{datetime.now()}] API Error: HTTP Status {response.status} for URL {url}", file=sys.stderr)
-        except Exception as e:
-            print(f"[{datetime.now()}] Connection Error fetching {url}: {e}", file=sys.stderr)
-            self.consecutive_errors += 1
-            if self.consecutive_errors >= 3:
-                log("[API] 3 consecutive connection errors detected. Triggering automatic IP rotation...")
-                proxy_manager.rotate_proxy()
-                self.consecutive_errors = 0
+                    log(f"Connection Error fetching {url}: {e} (all {self.max_retries+1} attempts failed)", error=True)
+                
+                if self.consecutive_errors >= 3:
+                    log("[API] 3 consecutive connection errors detected. Triggering automatic IP rotation...")
+                    proxy_manager.rotate_proxy()
+                    self.consecutive_errors = 0
         return None
 
     def get_live_games(self, sport_id):
@@ -352,12 +376,12 @@ class PredictionEngine:
                     # Check Away Win odds drop
                     if opening_away and live_away and config.MIN_ODDS <= live_away <= config.MAX_ODDS:
                         drop_away = cls.calculate_drop_pct(opening_away, live_away)
-                        if drop_away >= 25.0:
+                        if drop_away >= config.ODDS_DROP_THRESHOLD_PCT:
                             prob_open = (1.0 / opening_away) * 100
                             prob_live = (1.0 / live_away) * 100
                             prob_shift = prob_live - prob_open
                             
-                            confidence = min(99, int(70 + (drop_away - 25.0) * 1.5))
+                            confidence = min(99, int(70 + (drop_away - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
                             
                             predictions.append({
                                 "market": market_name,
@@ -407,7 +431,7 @@ class PredictionEngine:
 
                         if rating_val is not None:
                             abs_rating = abs(rating_val)
-                            if abs_rating >= 1.2:
+                            if abs_rating >= config.MIN_ALG1_RATING_THRESHOLD:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
 
                                 opening_over = first_prematch.get("row1")
@@ -441,8 +465,9 @@ class PredictionEngine:
                                                 continue
                                             # For Soccer: current goal rate must project to at least 80% of line by 90'
                                             if sport_id == config.SPORT_SOCCER:
-                                                match_min_safe = max(1, match_min if 'match_min' in dir() else 1)
-                                                projected_goals = (current_total / match_min_safe) * 90
+                                                # Use the match minute we already computed earlier
+                                                safe_minute = max(1, match_minute)
+                                                projected_goals = (current_total / safe_minute) * 90
                                                 if projected_goals < live_line * 0.80:
                                                     continue
                                         elif dir_word == "Under":
@@ -538,7 +563,7 @@ class TelegramBot:
                 res = json.loads(response.read().decode('utf-8'))
                 return res.get("ok", False)
         except Exception as e:
-            print(f"[{datetime.now()}] Failed to send Telegram message: {e}", file=sys.stderr)
+            log(f"Failed to send Telegram message: {e}", error=True)
             return False
 
 
@@ -549,7 +574,7 @@ def load_lock_state():
             with open(LOCK_FILE, "r") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Error reading lock file: {e}", file=sys.stderr)
+            log(f"Error reading lock file: {e}", error=True)
     return {"locked": False}
 
 
@@ -559,7 +584,7 @@ def save_lock_state(state):
         with open(LOCK_FILE, "w") as f:
             json.dump(state, f, indent=2)
     except Exception as e:
-        print(f"Error writing lock file: {e}", file=sys.stderr)
+        log(f"Error writing lock file: {e}", error=True)
 
 
 def load_stats():
@@ -569,7 +594,7 @@ def load_stats():
             with open(STATS_FILE, "r") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Error reading stats file: {e}", file=sys.stderr)
+            log(f"Error reading stats file: {e}", error=True)
     return {
         "wins": 0,
         "losses": 0,
@@ -588,7 +613,7 @@ def save_stats(stats):
         with open(STATS_FILE, "w") as f:
             json.dump(stats, f, indent=2)
     except Exception as e:
-        print(f"Error writing stats file: {e}", file=sys.stderr)
+        log(f"Error writing stats file: {e}", error=True)
 
 
 def update_stats(result):
@@ -780,7 +805,7 @@ def format_settlement_alert(sport_id, lock_state, final_score, result, stats):
 
 
 def main():
-    print(f"[{datetime.now()}] Starting SOOBRADAR Live Prediction Bot...")
+    log("Starting SOOBRADAR Live Prediction Bot...")
     client = InforadarAPIClient()
     bot = TelegramBot()
     
@@ -891,7 +916,7 @@ def main():
                     sport_name = "Soccer" if sport_id == config.SPORT_SOCCER else "Basketball"
                     live_games = client.get_live_games(sport_id)
                     
-                    print(f"[{datetime.now()}] [Status: UNLOCKED] Scanned {len(live_games)} live {sport_name} games.")
+                    log(f"[Status: UNLOCKED] Scanned {len(live_games)} live {sport_name} games.")
                     
                     for game in live_games:
                         # Re-verify lock state inside loop in case it got locked in this iteration
@@ -933,7 +958,7 @@ def main():
                         match_cache[event_id] = state_key
                         
                         odds_data = client.get_game_odds(sport_id, event_id)
-                        time.sleep(1.5)  # Throttle to prevent IP ban
+                        time.sleep(0.8)  # Throttle to prevent IP ban (reduced from 1.5s)
                         if not odds_data:
                             continue
                         
@@ -945,7 +970,7 @@ def main():
                             
                             msg = format_telegram_alert(sport_id, game, pred, stats)
                             
-                            print(f"[{datetime.now()}] Found prediction: {pred['prediction']}. Sending alert and locking bot...")
+                            log(f"Found prediction: {pred['prediction']}. Sending alert and locking bot...")
                             
                             success = bot.send_message(msg)
                             if success:
@@ -964,7 +989,7 @@ def main():
                                     "reason": pred["reason"]
                                 }
                                 save_lock_state(new_lock)
-                                print(f"[{datetime.now()}] Bot is successfully locked on event {event_id}.")
+                                log(f"Bot is successfully locked on event {event_id}.")
                                 break
                                 
                             time.sleep(1.0)

@@ -5,11 +5,12 @@ the peak Alg.1 signal and any 1X2 odds drops that would have triggered,
 then validates against the final score.
 """
 import sys
+import os
 import time
 import json
 from datetime import datetime
 
-sys.path.insert(0, r'D:\Project\SOOBRADAR')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import config
 except ImportError:

@@ -30,5 +30,5 @@ HT_ABNORMAL_LINE_GAP_THRESHOLD = 1.0 # Line must be at least this much higher th
 
 # General monitoring settings
 POLL_INTERVAL_SECONDS = 60
-REQUEST_TIMEOUT_SECONDS = 8   # Fail fast — 8s is enough for a healthy API response
+REQUEST_TIMEOUT_SECONDS = 15  # Increased from 8s — API can be slow; retry logic handles timeouts
 MAX_CACHE_SIZE = 1000
