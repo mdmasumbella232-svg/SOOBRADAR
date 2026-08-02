@@ -592,18 +592,7 @@ def evaluate_prediction(pred_info, final_home_score, final_away_score):
     prediction = pred_info.get("prediction", "")
     total_goals = final_home_score + final_away_score
     
-    if "Win" in prediction or prediction in ["1", "2"]:
-        if prediction == "1":
-            if final_home_score > final_away_score:
-                return "WIN"
-            else:
-                return "LOSS"
-        elif prediction == "2":
-            if final_away_score > final_home_score:
-                return "WIN"
-            else:
-                return "LOSS"
-                
+    # 1X2 evaluation removed — bot only picks Total Over/Under
     if "Over" in prediction:
         try:
             line_val = float(prediction.split("Over ")[1])
@@ -681,23 +670,14 @@ def format_telegram_alert(sport_id, match, prediction, stats):
         f"🔗 <a href='{match_url}'>Open Match</a>\n\n"
     )
 
-    # Market details
-    if prediction["market"] == "1X2":
-        msg += (
-            f"🎯 1X2 → {prediction['prediction']} 🟢 STRONG ({prediction['confidence']}%)\n"
-            f"  Open: 1={prediction['open_1']} X={prediction['open_x']} 2={prediction['open_2']}\n"
-            f"  Now:  1={prediction['now_1']} X={prediction['now_x']} 2={prediction['now_2']}\n"
-            f"  Drift: 1={prediction['drift_1']} X={prediction['drift_x']} 2={prediction['drift_2']}\n"
-            f"  📈 Prob shift: {prediction['prob_shift']}%\n"
-        )
-    else:
-        msg += (
-            f"🎯 Total {prediction['total_dir']}: {prediction['total_line']} 🟢 STRONG ({prediction['confidence']}%)\n"
-            f"  Line: {prediction['open_line']} → {prediction['now_line']} ({prediction['line_diff']})\n"
-            f"  Over: {prediction['open_over']} → {prediction['now_over']}\n"
-            f"  Under: {prediction['open_under']} → {prediction['now_under']}\n"
-            f"  📊 Alg: {prediction['alg_val']} ({prediction['alg_dir']})\n"
-        )
+    # Market details — Total Over/Under only
+    msg += (
+        f"🎯 Total {prediction['total_dir']}: {prediction['total_line']} 🟢 STRONG ({prediction['confidence']}%)\n"
+        f"  Line: {prediction['open_line']} → {prediction['now_line']} ({prediction['line_diff']})\n"
+        f"  Over: {prediction['open_over']} → {prediction['now_over']}\n"
+        f"  Under: {prediction['open_under']} → {prediction['now_under']}\n"
+        f"  📊 Alg: {prediction['alg_val']} ({prediction['alg_dir']})\n"
+    )
 
     msg += (
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -728,19 +708,17 @@ def format_settlement_alert(sport_id, lock_state, final_score, result, stats):
         f"Final: {final_score}\n"
     )
 
-    if market == "1X2":
-        msg += f"Pick: 1X2 → {prediction_val}\n"
-    else:
-        msg += f"Pick: Total {prediction_val}\n"
-        # Extract total goals
-        total_goals = 0
-        try:
-            if "-" in final_score:
-                parts = final_score.split("-")
-                total_goals = int(parts[0]) + int(parts[1])
-        except Exception:
-            pass
-        msg += f"Total goals: {total_goals}\n"
+    # Total Over/Under settlement
+    msg += f"Pick: Total {prediction_val}\n"
+    # Extract total goals
+    total_goals = 0
+    try:
+        if "-" in final_score:
+            parts = final_score.split("-")
+            total_goals = int(parts[0]) + int(parts[1])
+    except Exception:
+        pass
+    msg += f"Total goals: {total_goals}\n"
 
     msg += (
         f"🔗 <a href='{match_url}'>Open Match</a>\n\n"
@@ -989,8 +967,8 @@ def main():
                                     "away": game.get("away", {}).get("name", "Away"),
                                     "market": pred["market"],
                                     "prediction": pred["prediction"],
-                                    "opening_val": pred.get("open_1") if pred["market"] == "1X2" else pred.get("open_line"),
-                                    "live_val": pred.get("now_1") if pred["market"] == "1X2" else pred.get("now_line"),
+                                    "opening_val": pred.get("open_line"),
+                                    "live_val": pred.get("now_line"),
                                     "reason": pred["reason"]
                                 }
                                 save_lock_state(new_lock)
