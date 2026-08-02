@@ -1057,13 +1057,7 @@ def main():
                         if time_status in ["3", "4", "99", "10"]:
                             continue
                         
-                        # FILTER: Skip low-stakes / exhibition leagues (unpredictable, poor data quality)
-                        league_name = str(game.get("league", {}).get("name", "")).lower()
-                        skip_leagues = ["friendly", "friendlies", "exhibition", "tournament", "cup friendly"]
-                        if any(skip_word in league_name for skip_word in skip_leagues):
-                            log(f"[SKIP] Skipping low-stakes league: {game.get('league', {}).get('name', '?')}")
-                            continue
-                            
+                        
                         # Prevent betting on games in the absolute final moments (API ghost lines)
                         time_info = game.get("time", {})
                         if sport_id == config.SPORT_BASKETBALL:
