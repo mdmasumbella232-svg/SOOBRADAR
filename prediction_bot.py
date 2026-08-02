@@ -220,9 +220,12 @@ class PredictionEngine:
             m_name = market.get("name", "")
             m_odds = market.get("odds", [])
             m_first = market.get("firstPrematch", {})
+            # Use earliest odds list entry as opening (same bookmaker as live odds)
+            # Fall back to firstPrematch if odds list is too short
+            m_earliest = m_odds[-1] if m_odds and isinstance(m_odds, list) and len(m_odds) > 1 else m_first
             if m_odds and isinstance(m_odds, list):
                 parsed_markets[m_name] = {
-                    "first": m_first,
+                    "first": m_earliest,
                     "latest": m_odds[0]
                 }
 
@@ -371,14 +374,44 @@ class PredictionEngine:
             # Latest live odds are the first item in the list
             latest_live = odds_list[0]
             
+            # --- BOOKMAKER COMPARISON FIX ---
+            # firstPrematch may come from a different bookmaker than the live odds list.
+            # This inflates the apparent drop when bookmakers disagree on the opening price.
+            # FIX: Use the earliest entry in the odds list (odds_list[-1]) as the opening,
+            # since it's from the same data source as the live odds.
+            # Fall back to firstPrematch only if the odds list is too short.
+            earliest_live = odds_list[-1] if len(odds_list) > 1 else first_prematch
+            
             # --- STRATEGY 1: 1X2 Odds Drop Strategy ---
             if market_name == "1X2":
-                opening_home = first_prematch.get("row1")
-                opening_draw = first_prematch.get("row2")
-                opening_away = first_prematch.get("row3")
+                # Use odds_list[-1] as opening (same bookmaker as live odds)
+                opening_home = earliest_live.get("row1") or first_prematch.get("row1")
+                opening_draw = earliest_live.get("row2") or first_prematch.get("row2")
+                opening_away = earliest_live.get("row3") or first_prematch.get("row3")
                 live_home = latest_live.get("row1")
                 live_draw = latest_live.get("row2")
                 live_away = latest_live.get("row3")
+                
+                # Cross-check: if firstPrematch and odds_list[-1] differ significantly,
+                # it means different bookmakers — log a warning
+                fp_home = first_prematch.get("row1")
+                fp_away = first_prematch.get("row3")
+                if fp_home and opening_home and abs(fp_home - opening_home) / fp_home > 0.15:
+                    log(f"[BOOKMAKER-WARN] 1X2 Home opening mismatch: firstPrematch={fp_home:.2f} vs odds_list[-1]={opening_home:.2f}. Using odds_list[-1].")
+                if fp_away and opening_away and abs(fp_away - opening_away) / fp_away > 0.15:
+                    log(f"[BOOKMAKER-WARN] 1X2 Away opening mismatch: firstPrematch={fp_away:.2f} vs odds_list[-1]={opening_away:.2f}. Using odds_list[-1].")
+                
+                # FILTER F: Soccer 1X2 goal-induced filter
+                # If the game is tied but the 1X2 odds for a team are very low (below 1.70),
+                # the odds are likely from AFTER a goal was scored (data timing issue).
+                # In a genuinely tied game, no team should have odds below 1.70.
+                if sport_id == config.SPORT_SOCCER and home_score == away_score:
+                    if live_home is not None and live_home < 1.70:
+                        log(f"[SKIP] Soccer 1X2 blocked: home odds {live_home:.2f} too low for tied game (goal-induced data)")
+                        continue
+                    if live_away is not None and live_away < 1.70:
+                        log(f"[SKIP] Soccer 1X2 blocked: away odds {live_away:.2f} too low for tied game (goal-induced data)")
+                        continue
                 
                 # We check odds drop if the game is currently tied
                 if home_score == away_score:
@@ -391,8 +424,8 @@ class PredictionEngine:
                             prob_live = (1.0 / live_home) * 100
                             prob_shift = prob_live - prob_open
                             
-                            # Calculate dynamic confidence rating based on drop
-                            confidence = min(99, int(70 + (drop_home - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
+                            # Confidence cap at 80% for 1X2 picks (bookmaker comparison can inflate)
+                            confidence = min(80, int(70 + (drop_home - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
                             
                             predictions.append({
                                 "market": market_name,
@@ -419,7 +452,8 @@ class PredictionEngine:
                             prob_live = (1.0 / live_away) * 100
                             prob_shift = prob_live - prob_open
                             
-                            confidence = min(99, int(70 + (drop_away - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
+                            # Confidence cap at 80% for 1X2 picks
+                            confidence = min(80, int(70 + (drop_away - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
                             
                             predictions.append({
                                 "market": market_name,
@@ -472,9 +506,9 @@ class PredictionEngine:
                             if abs_rating >= config.MIN_ALG1_RATING_THRESHOLD:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
 
-                                opening_over = first_prematch.get("row1")
-                                opening_line = first_prematch.get("row2")
-                                opening_under = first_prematch.get("row3")
+                                opening_over = earliest_live.get("row1") or first_prematch.get("row1")
+                                opening_line = earliest_live.get("row2") or first_prematch.get("row2")
+                                opening_under = earliest_live.get("row3") or first_prematch.get("row3")
 
                                 live_over = latest_live.get("row1")
                                 live_line = latest_live.get("row2")
@@ -571,7 +605,7 @@ class PredictionEngine:
                         pass
                 
                 if is_ht:
-                    opening_line = first_prematch.get("row2")
+                    opening_line = earliest_live.get("row2") or first_prematch.get("row2")
                     live_line = latest_live.get("row2")
                     if opening_line is not None and live_line is not None and opening_line > 0:
                         expected_ht_line = opening_line / 2.0
@@ -588,9 +622,9 @@ class PredictionEngine:
                                     "open_line": f"{opening_line}",
                                     "now_line": f"{live_line}",
                                     "line_diff": f"{live_line - opening_line:+.2f}",
-                                    "open_over": f"{first_prematch.get('row1', 0):.2f}" if first_prematch.get('row1') else "N/A",
+                                    "open_over": f"{earliest_live.get('row1', 0):.2f}" if earliest_live.get('row1') else "N/A",
                                     "now_over": f"{live_over:.2f}",
-                                    "open_under": f"{first_prematch.get('row3', 0):.2f}" if first_prematch.get('row3') else "N/A",
+                                    "open_under": f"{earliest_live.get('row3', 0):.2f}" if earliest_live.get('row3') else "N/A",
                                     "now_under": f"{latest_live.get('row3', 0):.2f}" if latest_live.get('row3') else "N/A",
                                     "alg_val": "Anomaly",
                                     "alg_dir": "Over",
