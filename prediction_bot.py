@@ -43,12 +43,16 @@ STATS_FILE = "stats.json"
 class ProxyManager:
     """Manages proxy rotation for API requests.
     Uses per-request opener instead of global install_opener to avoid
-    interfering with other urllib calls (e.g. proxy list fetch itself)."""
+    interfering with other urllib calls (e.g. proxy list fetch itself).
+    Supports forced direct connection mode for fallback when proxies fail."""
     def __init__(self):
         self.proxies = []
         self.current_proxy = None
         self.proxy_api_url = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
         self._lock = threading.Lock()
+        self.force_direct = False  # When True, skip proxy and use direct connection
+        self.direct_fail_count = 0  # Track consecutive direct connection failures
+        self.proxy_fail_count = 0   # Track consecutive proxy failures
 
     def fetch_proxies(self):
         try:
@@ -75,6 +79,8 @@ class ProxyManager:
                 import random
                 self.current_proxy = random.choice(self.proxies)
                 self.proxies.remove(self.current_proxy)
+                self.proxy_fail_count = 0
+                self.force_direct = False
                 log(f"[PROXY] Rotating to new iplocate proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
                 return True
             else:
@@ -82,12 +88,24 @@ class ProxyManager:
                 self.current_proxy = None
                 return False
 
-    def get_opener(self):
+    def toggle_direct_mode(self, enable):
+        """Switch between proxy and direct connection mode.
+        When proxies fail, we fall back to direct; when direct fails, we go back to proxy."""
+        with self._lock:
+            self.force_direct = enable
+            if enable:
+                self.current_proxy = None
+                log("[PROXY] Switched to DIRECT connection mode (no proxy)")
+            else:
+                log("[PROXY] Switched back to PROXY mode")
+
+    def get_opener(self, use_direct=False):
         """Build a per-request opener with the current proxy and SSL context.
-        HTTPSHandler is used to embed the ssl_ctx so opener.open() doesn't need context= kwarg."""
+        HTTPSHandler is used to embed the ssl_ctx so opener.open() doesn't need context= kwarg.
+        use_direct=True forces direct connection regardless of proxy state."""
         with self._lock:
             https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
-            if self.current_proxy:
+            if self.current_proxy and not self.force_direct and not use_direct:
                 proxy_handler = urllib.request.ProxyHandler({
                     'http': f"http://{self.current_proxy}",
                     'https': f"http://{self.current_proxy}"
@@ -109,57 +127,92 @@ class InforadarAPIClient:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json'
         }
-        self.consecutive_errors = 0
+        self.consecutive_errors = {}  # Track errors per sport_id to avoid cross-sport reset
         self.max_retries = 3  # Number of retries per request
         self.retry_backoff_base = 2  # Seconds for first retry delay
 
-    def _request(self, endpoint, params=None, max_retries=None):
+    def _request(self, endpoint, params=None, max_retries=None, sport_id=None):
         url = f"{self.base_url}/{self.api_root}/{endpoint.lstrip('/')}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         
         req = urllib.request.Request(url, headers=self.headers)
         retries = max_retries if max_retries is not None else self.max_retries
+        error_key = sport_id if sport_id is not None else "default"
         
+        # Strategy: First try with proxy, then fall back to direct connection
+        # Half the retries go through proxy, half through direct connection
         for attempt in range(retries + 1):
             try:
-                # Use per-request opener with proxy if available (SSL context is baked into the opener)
-                opener = proxy_manager.get_opener()
-                with opener.open(req, timeout=config.REQUEST_TIMEOUT_SECONDS) as response:
+                # On later attempts (after half fail), try direct connection as fallback
+                use_direct = attempt > retries // 2
+                opener = proxy_manager.get_opener(use_direct=use_direct)
+                # Use longer timeout for live_games endpoint (large response)
+                timeout = config.REQUEST_TIMEOUT_SECONDS
+                if endpoint == "live_games":
+                    timeout = max(timeout, 20)  # At least 20s for live_games
+                with opener.open(req, timeout=timeout) as response:
                     if response.status == 200:
-                        self.consecutive_errors = 0
-                        return json.loads(response.read().decode('utf-8'))
+                        self.consecutive_errors[error_key] = 0
+                        data = json.loads(response.read().decode('utf-8'))
+                        # If direct connection worked, remember that
+                        if use_direct:
+                            proxy_manager.direct_fail_count = 0
+                        else:
+                            proxy_manager.proxy_fail_count = 0
+                        return data
                     else:
                         log(f"API Error: HTTP Status {response.status} for URL {url}", error=True)
                         return None
             except Exception as e:
                 if attempt < retries:
                     delay = self.retry_backoff_base * (2 ** attempt)  # 2, 4, 8 seconds...
-                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, retrying in {delay}s)", error=True)
+                    mode = "DIRECT" if attempt > retries // 2 else "PROXY"
+                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, mode={mode}, retrying in {delay}s)", error=True)
+                    # Rotate proxy on each failed attempt for faster recovery
+                    if not use_direct:
+                        proxy_manager.rotate_proxy()
                     time.sleep(delay)
                     continue
                 else:
-                    log(f"Connection Error fetching {url}: {e} (all {retries+1} attempts failed)", error=True)
+                    mode = "DIRECT" if attempt > retries // 2 else "PROXY"
+                    log(f"Connection Error fetching {url}: {e} (all {retries+1} attempts failed, last mode={mode})", error=True)
                     # Only count complete failures (not individual retry attempts)
-                    self.consecutive_errors += 1
+                    self.consecutive_errors[error_key] = self.consecutive_errors.get(error_key, 0) + 1
                 
-                if self.consecutive_errors >= 3:
-                    log("[API] 3 consecutive connection errors detected. Triggering automatic IP rotation...")
+                if self.consecutive_errors.get(error_key, 0) >= 3:
+                    sport_name = f"Sport {sport_id}" if sport_id is not None else "API"
+                    log(f"[API] 3 consecutive {sport_name} errors detected. Triggering automatic IP rotation...")
                     proxy_manager.rotate_proxy()
-                    self.consecutive_errors = 0
+                    self.consecutive_errors[error_key] = 0
         return None
 
     def get_live_games(self, sport_id):
-        """Fetch current live games for a specific sport."""
-        params = {
-            "sport_id": sport_id,
-            "page": 1,
-            "per_page": 1000
-        }
-        data = self._request("live_games", params, max_retries=2)  # 2 retries for important list endpoint
-        if data and data.get("success") == 1:
-            return data.get("results", [])
-        return []
+        """Fetch current live games for a specific sport.
+        Uses smaller per_page (100) to reduce response size and avoid timeouts.
+        Fetches up to 3 pages to cover all live games."""
+        all_games = []
+        pages_fetched = 0
+        for page in range(1, 4):  # Fetch up to 3 pages (max 300 games)
+            params = {
+                "sport_id": sport_id,
+                "page": page,
+                "per_page": 100  # Reduced from 1000 — soccer has many games, huge response causes timeouts
+            }
+            data = self._request("live_games", params, max_retries=3, sport_id=sport_id)
+            if data and data.get("success") == 1:
+                results = data.get("results", [])
+                all_games.extend(results)
+                pages_fetched = page
+                # If we got fewer than per_page results, this is the last page
+                if len(results) < 100:
+                    break
+            else:
+                # If a page fails, stop pagination and return what we have
+                break
+        if pages_fetched > 1:
+            log(f"[API] Fetched {len(all_games)} live games across {pages_fetched} page(s) for sport_id={sport_id}")
+        return all_games
 
     def get_finished_games(self, sport_id):
         """Fetch finished games for a specific sport."""
@@ -168,7 +221,7 @@ class InforadarAPIClient:
             "page": 1,
             "per_page": 50
         }
-        data = self._request("finished_games/", params, max_retries=2)
+        data = self._request("finished_games/", params, max_retries=2, sport_id=sport_id)
         if data and data.get("success") == 1:
             return data.get("results", [])
         return []
@@ -176,14 +229,14 @@ class InforadarAPIClient:
     def get_game_view(self, sport_id, event_id):
         """Fetch game details / stats."""
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
-        return self._request(f"{sport_path}/game/view", {"event_id": event_id}, max_retries=1)
+        return self._request(f"{sport_path}/game/view", {"event_id": event_id}, max_retries=1, sport_id=sport_id)
 
     def get_game_odds(self, sport_id, event_id):
         """Fetch game odds history for the standard 6 markets."""
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
         # Soccer uses 8,5,6,1,2,3 markets, Basketball uses 4,5,6,1,2,3 markets
         markets = "8,5,6,1,2,3" if sport_id == config.SPORT_SOCCER else "4,5,6,1,2,3"
-        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=1)  # 1 retry for odds — skip fast
+        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=1, sport_id=sport_id)  # 1 retry for odds — skip fast
 
 
 class PredictionEngine:
