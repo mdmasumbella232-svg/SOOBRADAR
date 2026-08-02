@@ -656,6 +656,7 @@ def load_stats():
         "wins": 0,
         "losses": 0,
         "draws": 0,
+        "voids": 0,
         "total_bets": 0,
         "current_streak_type": "win",
         "current_streak_val": 0,
@@ -675,6 +676,14 @@ def save_stats(stats):
 
 def update_stats(result):
     stats = load_stats()
+    
+    if result == "VOID":
+        # Void bets don't count at all — no total_bets, no streak, no W/L
+        stats["voids"] = stats.get("voids", 0) + 1
+        log(f"[VOID] Bet voided. Not counted in W/L record.")
+        save_stats(stats)
+        return stats
+    
     stats["total_bets"] += 1
     
     if result == "WIN":
@@ -757,7 +766,8 @@ def format_stats_line(stats):
     streak_val = stats.get("current_streak_val", 0)
     streak_emoji = "🔥" if streak_type == "win" else "❄️"
     
-    return f"📊 Record: W{wins} / L{losses} / D{draws} | Total Bets: {total} | Hit Rate: {hit_rate}% | Current streak: {streak_emoji}{streak_val} | Longest W: {stats.get('longest_w', 0)} | Longest L: {stats.get('longest_l', 0)}"
+    voids = stats.get("voids", 0)
+    return f"📊 Record: W{wins} / L{losses} / D{draws} / V{voids} | Total Bets: {total} | Hit Rate: {hit_rate}% | Current streak: {streak_emoji}{streak_val} | Longest W: {stats.get('longest_w', 0)} | Longest L: {stats.get('longest_l', 0)}"
 
 
 def format_telegram_alert(sport_id, match, prediction, stats):
@@ -863,6 +873,22 @@ def format_settlement_alert(sport_id, lock_state, final_score, result, stats):
 
 def main():
     log("Starting SOOBRADAR Live Prediction Bot...")
+    
+    # --- ONE-TIME STATS CORRECTION ---
+    # Fix the incorrect LOSS from the postponed Livingstone vs Tropical Royals game
+    # (game was postponed but bot counted it as LOSS — should be VOID)
+    stats = load_stats()
+    if stats.get("total_bets") == 3 and stats.get("wins") == 1 and stats.get("losses") == 2 and stats.get("voids", 0) == 0:
+        log("[CORRECTION] Fixing incorrect LOSS from postponed Livingstone vs Tropical Royals game")
+        stats["losses"] = 1
+        stats["voids"] = 1
+        stats["total_bets"] = 2
+        stats["current_streak_type"] = "loss"
+        stats["current_streak_val"] = 1
+        stats["longest_l"] = 1
+        save_stats(stats)
+        log("[CORRECTION] Stats corrected: W1/L1/V1 | Total Bets: 2")
+    
     client = InforadarAPIClient()
     bot = TelegramBot()
     
@@ -912,13 +938,27 @@ def main():
                 time_status = None
 
                 # --- PRIMARY: Try game_view endpoint ---
+                # timeStatus meanings: "2"=Finished, "3"=Cancelled, "4"=Postponed, "10"=Abandoned, "99"=Unknown
+                VOID_STATUSES = {"3", "4", "10"}   # Cancelled, Postponed, Abandoned → VOID
+                FINISH_STATUSES = {"2"}             # Finished → evaluate score
+                UNKNOWN_STATUSES = {"99"}           # Unknown → treat as VOID (can't confirm result)
+                ALL_SETTLE_STATUSES = FINISH_STATUSES | VOID_STATUSES | UNKNOWN_STATUSES
+
                 game_view = client.get_game_view(sport_id, event_id)
+                is_void = False
+                void_reason = ""
                 if game_view:
                     time_status = str(game_view.get("timeStatus", ""))
                     scores = game_view.get("scores", "0-0")
-                    if time_status in ["2", "3", "4", "99", "10"]:
+                    if time_status in ALL_SETTLE_STATUSES:
                         settled = True
-                        log(f"[SETTLE] game_view confirms match finished. Score: {scores}")
+                        if time_status in VOID_STATUSES:
+                            is_void = True
+                            void_reason = {"3": "Cancelled", "4": "Postponed", "10": "Abandoned"}.get(time_status, "Unknown")
+                        elif time_status in UNKNOWN_STATUSES:
+                            is_void = True
+                            void_reason = "Unknown status"
+                        log(f"[SETTLE] game_view timeStatus={time_status}. Score: {scores}. Void={is_void} ({void_reason})")
 
                 # --- FALLBACK: API was down or game_view returned nothing ---
                 # Search the finished_games list for the event_id
@@ -929,11 +969,17 @@ def main():
                         if str(fin_game.get("id")) == str(event_id):
                             fin_status = str(fin_game.get("timeStatus", ""))
                             fin_scores = fin_game.get("scores", "0-0")
-                            if fin_status in ["2", "3", "4", "99", "10"]:
+                            if fin_status in ALL_SETTLE_STATUSES:
                                 settled = True
                                 scores = fin_scores
                                 time_status = fin_status
-                                log(f"[FALLBACK] Found event {event_id} in finished_games. Score: {scores}")
+                                if fin_status in VOID_STATUSES:
+                                    is_void = True
+                                    void_reason = {"3": "Cancelled", "4": "Postponed", "10": "Abandoned"}.get(fin_status, "Unknown")
+                                elif fin_status in UNKNOWN_STATUSES:
+                                    is_void = True
+                                    void_reason = "Unknown status"
+                                log(f"[FALLBACK] Found event {event_id} in finished_games. Score: {scores}. Void={is_void} ({void_reason})")
                             break
 
                 # --- Periodic heartbeat: log every 30 cycles so user knows bot is alive ---
@@ -944,25 +990,47 @@ def main():
                     log(f"[HEARTBEAT] Still locked on {home} vs {away} | Waiting for settlement...")
 
                 if settled and scores is not None:
-                    log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
+                    if is_void:
+                        # Game was cancelled/postponed/abandoned — VOID the bet
+                        log(f"[VOID] Match {home} vs {away} was {void_reason}. Score: {scores}. Voiding bet.")
+                        result = "VOID"
+                        stats = update_stats(result)
 
-                    home_score, away_score = 0, 0
-                    try:
-                        if "-" in scores:
-                            parts = scores.split("-")
-                            home_score = int(parts[0])
-                            away_score = int(parts[1])
-                    except Exception:
-                        pass
+                        sport_emoji = "⚽" if sport_id == config.SPORT_SOCCER else "🏀"
+                        void_msg = (
+                            f"💤 <b>BET VOIDED — {void_reason.upper()}</b>\n\n"
+                            f"{sport_emoji} {home} vs {away}\n"
+                            f"Final: {scores}\n"
+                            f"Pick: {prediction}\n"
+                            f"Reason: Game was {void_reason}\n\n"
+                            f"🔓 <i>Bot is now UNLOCKED — scanning for next pick</i>\n\n"
+                            f"{format_stats_line(stats)}"
+                        )
+                        bot.send_message(void_msg)
 
-                    result = evaluate_prediction(lock_state, home_score, away_score)
-                    stats = update_stats(result)
+                        save_lock_state({"locked": False})
+                        log(f"[UNLOCK] Bot is now UNLOCKED. Bet voided ({void_reason}). Scanning for next pick...")
+                    else:
+                        # Normal settlement — game finished
+                        log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
 
-                    msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
-                    bot.send_message(msg)
+                        home_score, away_score = 0, 0
+                        try:
+                            if "-" in scores:
+                                parts = scores.split("-")
+                                home_score = int(parts[0])
+                                away_score = int(parts[1])
+                        except Exception:
+                            pass
 
-                    save_lock_state({"locked": False})
-                    log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
+                        result = evaluate_prediction(lock_state, home_score, away_score)
+                        stats = update_stats(result)
+
+                        msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
+                        bot.send_message(msg)
+
+                        save_lock_state({"locked": False})
+                        log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
                 elif not game_view and not settled:
                     log("[API-DOWN] Could not reach API. Will retry next cycle...", error=True)
 
