@@ -236,7 +236,7 @@ class InforadarAPIClient:
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
         # Soccer uses 8,5,6,1,2,3 markets, Basketball uses 4,5,6,1,2,3 markets
         markets = "8,5,6,1,2,3" if sport_id == config.SPORT_SOCCER else "4,5,6,1,2,3"
-        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=1, sport_id=sport_id)  # 1 retry for odds — skip fast
+        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=2, sport_id=sport_id)  # 2 retries — more chances to fetch odds before skipping
 
 
 class PredictionEngine:
