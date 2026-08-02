@@ -328,14 +328,18 @@ class PredictionEngine:
                     # RULE 1: Competitive Under (Soccer) — ACTIVE (widened for aggressive mode)
                     # Widened: accept 1X2 odds 1.50-4.00 (was 1.60-3.50), opening lines 3.00-3.75 (was 3.25-3.50),
                     # line drops of 0.25 or 0.50 (was only 0.25)
+                    # IMPORTANT: game must have ACTUALLY started (score must be a valid number like "0-0"),
+                    # not just "None" or empty. Pre-match line drops are NOT live signals.
                     if 1.50 <= open_home <= 4.00 and 1.50 <= open_away <= 4.00:
                         open_line = p_tot.get("row2")
                         live_line = l_tot.get("row2")
-                        # Check: game must have started (score must not be None)
+                        # Check: game must have started (score must be a valid number like "0-0")
+                        # "None" or "" means the game hasn't started — skip pre-match line drops
+                        score_valid = scores is not None and str(scores) not in ["None", ""] and "-" in str(scores)
                         # Check: live Under odds must exist and be within acceptable range
                         live_under_odds = l_tot.get("row3")
                         if (open_line in [3.00, 3.25, 3.50, 3.75] and live_line is not None
-                                and scores is not None and str(scores) not in ["None", ""]
+                                and score_valid
                                 and live_under_odds is not None
                                 and config.MIN_ODDS <= live_under_odds <= config.MAX_ODDS):
                             line_drop = open_line - live_line if live_line is not None else 0
@@ -519,7 +523,7 @@ class PredictionEngine:
                                     "open_under": f"{opening_under:.2f}" if opening_under is not None else "N/A",
                                     "now_under": f"{live_under:.2f}" if live_under is not None else "N/A",
                                     "alg_val": f"{rating_val:.2f}",
-                                    "alg_dir": f"{direction if direction else 'None'}",
+                                    "alg_dir": f"{dir_word}",
                                     "reason": f"Alg.1 Rating deviation detected: {rating_val:+.2f}."
                                 })
 
