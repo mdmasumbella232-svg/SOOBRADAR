@@ -257,7 +257,9 @@ class PredictionEngine:
         away_team = match.get("away", {}).get("name", "Away")
         scores = match.get("scores", "0-0")
         
-        # Parse scores
+        # Parse scores — prefer odds data over game list for accuracy
+        # The game list is fetched before the odds data, so a goal can be scored
+        # between the two fetches. Using stale game list score causes false signals.
         home_score, away_score = 0, 0
         try:
             if "-" in scores:
@@ -266,6 +268,11 @@ class PredictionEngine:
                 away_score = int(parts[1])
         except Exception:
             pass
+
+        # Track the most up-to-date score from odds data (updated during market parsing)
+        # This is used by Strategy 3 (HT Anomaly) and Strategy 2 (FILTER E/C) to avoid
+        # false signals from stale game list data.
+        latest_odds_home, latest_odds_away = home_score, away_score
 
         # Pre-parse markets for cross-market strategies
         parsed_markets = {}
@@ -362,6 +369,22 @@ class PredictionEngine:
             # Latest live odds are the first item in the list
             latest_live = odds_list[0]
             
+            # --- SCORE VERIFICATION FIX ---
+            # Extract the live score from the latest odds entry.
+            # This is more current than the game list score (which was fetched earlier).
+            # A goal can be scored between the game list fetch and the odds fetch,
+            # causing false signals if we use the stale game list score.
+            odds_score_str = str(latest_live.get("scores", "")).strip()
+            if odds_score_str and odds_score_str not in ["None", "-", ""]:
+                try:
+                    sp = odds_score_str.split("-")
+                    odds_h = int(sp[0])
+                    odds_a = int(sp[1])
+                    # Update the latest score (only overwrite if we got valid data)
+                    latest_odds_home, latest_odds_away = odds_h, odds_a
+                except Exception:
+                    pass
+            
             # --- BOOKMAKER COMPARISON FIX ---
             # firstPrematch may come from a different bookmaker than the live odds list.
             # This inflates the apparent drop when bookmakers disagree on the opening price.
@@ -428,8 +451,9 @@ class PredictionEngine:
                                 # When goals are scored, the total line mechanically adjusts upward.
                                 # This is NOT a predictive signal — the market is just repricing.
                                 # Only pick Over when the line movement exceeds what goals explain.
+                                # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
-                                    total_goals = home_score + away_score
+                                    total_goals = latest_odds_home + latest_odds_away
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
                                         if line_diff_val > 0 and line_diff_val <= total_goals + 0.25:
@@ -444,7 +468,7 @@ class PredictionEngine:
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
                                 if live_line is not None and live_line > 0:
                                     try:
-                                        current_total = home_score + away_score
+                                        current_total = latest_odds_home + latest_odds_away
                                         pace_ratio = current_total / live_line
                                         if dir_word == "Over":
                                             # Current total must already be at least 60% of line
@@ -488,7 +512,13 @@ class PredictionEngine:
                                 })
 
             # --- STRATEGY 3: Abnormal Line Dynamics (Soccer Halftime) ---
-            if sport_id == config.SPORT_SOCCER and market_name == "Total" and home_score == 0 and away_score == 0:
+            # IMPORTANT: Use latest_odds_home/latest_odds_away (from the latest odds entry),
+            # not home_score/away_score from the game list.
+            # The game list is fetched before the odds data, so a goal can be scored
+            # between the two fetches. Using the stale game list score causes false
+            # anomalies (e.g., game list says 0-0 but odds data shows 1-0 after a goal).
+
+            if sport_id == config.SPORT_SOCCER and market_name == "Total" and latest_odds_home == 0 and latest_odds_away == 0:
                 time_info = match.get("time", {})
                 tm_str = str(time_info.get("tm", ""))
                 is_ht = False
@@ -511,6 +541,9 @@ class PredictionEngine:
                             # Ensure live Over odds are within acceptable range
                             live_over = latest_live.get("row1")
                             if live_over is not None and config.MIN_ODDS <= live_over <= config.MAX_ODDS:
+                                # Log score verification for debugging
+                                if latest_odds_home != home_score or latest_odds_away != away_score:
+                                    log(f"[STRAT3] Score verified from odds data: {latest_odds_home}-{latest_odds_away} (game list had {home_score}-{away_score})")
                                 predictions.append({
                                     "market": market_name,
                                     "prediction": f"Over {live_line}",
