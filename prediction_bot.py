@@ -113,14 +113,15 @@ class InforadarAPIClient:
         self.max_retries = 3  # Number of retries per request
         self.retry_backoff_base = 2  # Seconds for first retry delay
 
-    def _request(self, endpoint, params=None):
+    def _request(self, endpoint, params=None, max_retries=None):
         url = f"{self.base_url}/{self.api_root}/{endpoint.lstrip('/')}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         
         req = urllib.request.Request(url, headers=self.headers)
+        retries = max_retries if max_retries is not None else self.max_retries
         
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(retries + 1):
             try:
                 # Use per-request opener with proxy if available (SSL context is baked into the opener)
                 opener = proxy_manager.get_opener()
@@ -132,14 +133,15 @@ class InforadarAPIClient:
                         log(f"API Error: HTTP Status {response.status} for URL {url}", error=True)
                         return None
             except Exception as e:
-                self.consecutive_errors += 1
-                if attempt < self.max_retries:
+                if attempt < retries:
                     delay = self.retry_backoff_base * (2 ** attempt)  # 2, 4, 8 seconds...
-                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{self.max_retries+1}, retrying in {delay}s)", error=True)
+                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, retrying in {delay}s)", error=True)
                     time.sleep(delay)
                     continue
                 else:
-                    log(f"Connection Error fetching {url}: {e} (all {self.max_retries+1} attempts failed)", error=True)
+                    log(f"Connection Error fetching {url}: {e} (all {retries+1} attempts failed)", error=True)
+                    # Only count complete failures (not individual retry attempts)
+                    self.consecutive_errors += 1
                 
                 if self.consecutive_errors >= 3:
                     log("[API] 3 consecutive connection errors detected. Triggering automatic IP rotation...")
@@ -154,7 +156,7 @@ class InforadarAPIClient:
             "page": 1,
             "per_page": 1000
         }
-        data = self._request("live_games", params)
+        data = self._request("live_games", params, max_retries=2)  # 2 retries for important list endpoint
         if data and data.get("success") == 1:
             return data.get("results", [])
         return []
@@ -166,7 +168,7 @@ class InforadarAPIClient:
             "page": 1,
             "per_page": 50
         }
-        data = self._request("finished_games/", params)
+        data = self._request("finished_games/", params, max_retries=2)
         if data and data.get("success") == 1:
             return data.get("results", [])
         return []
@@ -174,14 +176,14 @@ class InforadarAPIClient:
     def get_game_view(self, sport_id, event_id):
         """Fetch game details / stats."""
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
-        return self._request(f"{sport_path}/game/view", {"event_id": event_id})
+        return self._request(f"{sport_path}/game/view", {"event_id": event_id}, max_retries=1)
 
     def get_game_odds(self, sport_id, event_id):
         """Fetch game odds history for the standard 6 markets."""
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
         # Soccer uses 8,5,6,1,2,3 markets, Basketball uses 4,5,6,1,2,3 markets
         markets = "8,5,6,1,2,3" if sport_id == config.SPORT_SOCCER else "4,5,6,1,2,3"
-        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets})
+        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=1)  # 1 retry for odds — skip fast
 
 
 class PredictionEngine:
