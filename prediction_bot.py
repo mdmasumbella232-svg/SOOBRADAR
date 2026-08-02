@@ -252,22 +252,14 @@ class PredictionEngine:
                 is_early = True
 
         if is_early:
-            # Get 1X2
-            m_1x2 = parsed_markets.get("1X2", {})
-            p_1x2 = m_1x2.get("first", {})
-            l_1x2 = m_1x2.get("latest", {})
-            
             # Get Total
             m_total = parsed_markets.get("Total", {})
             p_tot = m_total.get("first", {})
             l_tot = m_total.get("latest", {})
             
-            # Get Handicap (Asian Handicap / Spread)
-            m_ah = parsed_markets.get("Handicap", {}) or parsed_markets.get("Asian Handicap", {})
-            p_ah = m_ah.get("first", {})
-            l_ah = m_ah.get("latest", {})
-            
-            # Extract opening 1X2 odds
+            # Get 1X2 (used only as condition for Soccer Rule 1 — Competitive Under)
+            m_1x2 = parsed_markets.get("1X2", {})
+            p_1x2 = m_1x2.get("first", {})
             open_home = p_1x2.get("row1")
             open_away = p_1x2.get("row3")
             
@@ -297,67 +289,6 @@ class PredictionEngine:
                                     "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line}. Live Under odds: {live_under_odds:.2f}"
                                 })
                     # RULE 2 (Blowout Over) and RULE 3 (Stale Line Over) REMOVED — poor backtest performance
-            
-            elif sport_id == config.SPORT_BASKETBALL:
-                if open_home and open_away:
-                    # RULE 1: Heavy Favorite Lock (Basketball)
-                    if open_home <= 1.40 or open_away <= 1.40:
-                        fav_pred = "1" if open_home <= 1.40 else "2"
-                        fav_odds = open_home if open_home <= 1.40 else open_away
-                        # Live odds of favorite must be within acceptable bet range
-                        live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
-                        if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
-                            # Calculate proper drift and prob_shift
-                            open_fav = open_home if fav_pred == "1" else open_away
-                            open_other = open_away if fav_pred == "1" else open_home
-                            live_other = l_1x2.get("row3") if fav_pred == "1" else l_1x2.get("row1")
-                            drift_fav = live_fav_odds - open_fav if live_fav_odds and open_fav else None
-                            drift_other = live_other - open_other if live_other and open_other else None
-                            prob_shift_fav = ((1.0/live_fav_odds) - (1.0/open_fav)) * 100 if live_fav_odds and open_fav else None
-                            confidence = min(99, int(85 + (1.40 - fav_odds) * 20))  # Lower odds = higher confidence
-                            predictions.append({
-                                "market": "1X2", "prediction": fav_pred, "confidence": confidence,
-                                "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
-                                "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                                "drift_1": f"{drift_fav:+.2f}" if drift_fav is not None else "N/A",
-                                "drift_x": "N/A",
-                                "drift_2": f"{drift_other:+.2f}" if drift_other is not None else "N/A",
-                                "prob_shift": f"{prob_shift_fav:+.1f}" if prob_shift_fav is not None else "N/A",
-                                "reason": f"Basketball Rule 1: Heavy Favorite Lock. Backing {fav_pred} at live odds {live_fav_odds}."
-                            })
-                        
-                    # RULE 2: Sharp Favorite Surge (Basketball)
-                    # Requires: Handicap movement AND 1X2 odds movement confirmation
-                    if 1.50 <= open_home <= 2.50 and 1.50 <= open_away <= 2.50:
-                        open_ah = p_ah.get("row2")
-                        live_ah = l_ah.get("row2")
-                        if open_ah is not None and live_ah is not None:
-                            ah_diff = live_ah - open_ah
-                            if abs(ah_diff) >= 1.0:
-                                fav_pred = "1" if ah_diff <= -1.0 else "2"
-                                live_fav_odds = l_1x2.get("row1") if fav_pred == "1" else l_1x2.get("row3")
-                                open_fav_odds = open_home if fav_pred == "1" else open_away
-                                # Live odds of favorite must be within acceptable bet range
-                                if live_fav_odds and config.MIN_ODDS <= live_fav_odds <= config.MAX_ODDS:
-                                    # CONFIRMATION: 1X2 odds must have moved (dropped) for the favorite
-                                    if open_fav_odds is not None and live_fav_odds < open_fav_odds:
-                                        # Calculate proper drift and prob_shift
-                                        open_other = open_away if fav_pred == "1" else open_home
-                                        live_other = l_1x2.get("row3") if fav_pred == "1" else l_1x2.get("row1")
-                                        drift_fav = live_fav_odds - open_fav_odds
-                                        drift_other = live_other - open_other if live_other and open_other else None
-                                        prob_shift_fav = ((1.0/live_fav_odds) - (1.0/open_fav_odds)) * 100
-                                        confidence = min(95, int(75 + abs(ah_diff) * 5))
-                                        predictions.append({
-                                            "market": "1X2", "prediction": fav_pred, "confidence": confidence,
-                                            "open_1": f"{open_home:.2f}", "open_x": "N/A", "open_2": f"{open_away:.2f}",
-                                            "now_1": f"{l_1x2.get('row1', 0):.2f}", "now_x": "N/A", "now_2": f"{l_1x2.get('row3', 0):.2f}",
-                                            "drift_1": f"{drift_fav:+.2f}" if fav_pred == "1" else (f"{drift_other:+.2f}" if drift_other is not None else "N/A"),
-                                            "drift_x": "N/A",
-                                            "drift_2": f"{drift_other:+.2f}" if fav_pred == "2" else (f"{drift_fav:+.2f}" if drift_fav is not None else "N/A"),
-                                            "prob_shift": f"{prob_shift_fav:+.1f}",
-                                            "reason": f"Basketball Rule 2: Sharp Favorite Surge. Spread moved {ah_diff} pts, 1X2 odds confirm. Backing {fav_pred}."
-                                        })
 
         # If a new strategy triggered, return immediately to lock it
         if predictions:
@@ -371,6 +302,10 @@ class PredictionEngine:
             if not odds_list or not isinstance(odds_list, list):
                 continue
             
+            # Skip 1X2 market — only Total Over/Under predictions
+            if market_name == "1X2":
+                continue
+            
             # Latest live odds are the first item in the list
             latest_live = odds_list[0]
             
@@ -381,96 +316,6 @@ class PredictionEngine:
             # since it's from the same data source as the live odds.
             # Fall back to firstPrematch only if the odds list is too short.
             earliest_live = odds_list[-1] if len(odds_list) > 1 else first_prematch
-            
-            # --- STRATEGY 1: 1X2 Odds Drop Strategy ---
-            if market_name == "1X2":
-                # Use odds_list[-1] as opening (same bookmaker as live odds)
-                opening_home = earliest_live.get("row1") or first_prematch.get("row1")
-                opening_draw = earliest_live.get("row2") or first_prematch.get("row2")
-                opening_away = earliest_live.get("row3") or first_prematch.get("row3")
-                live_home = latest_live.get("row1")
-                live_draw = latest_live.get("row2")
-                live_away = latest_live.get("row3")
-                
-                # Cross-check: if firstPrematch and odds_list[-1] differ significantly,
-                # it means different bookmakers — log a warning
-                fp_home = first_prematch.get("row1")
-                fp_away = first_prematch.get("row3")
-                if fp_home and opening_home and abs(fp_home - opening_home) / fp_home > 0.15:
-                    log(f"[BOOKMAKER-WARN] 1X2 Home opening mismatch: firstPrematch={fp_home:.2f} vs odds_list[-1]={opening_home:.2f}. Using odds_list[-1].")
-                if fp_away and opening_away and abs(fp_away - opening_away) / fp_away > 0.15:
-                    log(f"[BOOKMAKER-WARN] 1X2 Away opening mismatch: firstPrematch={fp_away:.2f} vs odds_list[-1]={opening_away:.2f}. Using odds_list[-1].")
-                
-                # FILTER F: Soccer 1X2 goal-induced filter
-                # If the game is tied but the 1X2 odds for a team are very low (below 1.70),
-                # the odds are likely from AFTER a goal was scored (data timing issue).
-                # In a genuinely tied game, no team should have odds below 1.70.
-                if sport_id == config.SPORT_SOCCER and home_score == away_score:
-                    if live_home is not None and live_home < 1.70:
-                        log(f"[SKIP] Soccer 1X2 blocked: home odds {live_home:.2f} too low for tied game (goal-induced data)")
-                        continue
-                    if live_away is not None and live_away < 1.70:
-                        log(f"[SKIP] Soccer 1X2 blocked: away odds {live_away:.2f} too low for tied game (goal-induced data)")
-                        continue
-                
-                # We check odds drop if the game is currently tied
-                if home_score == away_score:
-                    # Check Home Win odds drop
-                    if opening_home and live_home and config.MIN_ODDS <= live_home <= config.MAX_ODDS:
-                        drop_home = cls.calculate_drop_pct(opening_home, live_home)
-                        if drop_home >= config.ODDS_DROP_THRESHOLD_PCT:
-                            # Implied probability shift
-                            prob_open = (1.0 / opening_home) * 100
-                            prob_live = (1.0 / live_home) * 100
-                            prob_shift = prob_live - prob_open
-                            
-                            # Confidence cap at 80% for 1X2 picks (bookmaker comparison can inflate)
-                            confidence = min(80, int(70 + (drop_home - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
-                            
-                            predictions.append({
-                                "market": market_name,
-                                "prediction": "1",
-                                "confidence": confidence,
-                                "open_1": f"{opening_home:.2f}" if opening_home else "N/A",
-                                "open_x": f"{opening_draw:.2f}" if opening_draw else "N/A",
-                                "open_2": f"{opening_away:.2f}" if opening_away else "N/A",
-                                "now_1": f"{live_home:.2f}" if live_home else "N/A",
-                                "now_x": f"{live_draw:.2f}" if live_draw else "N/A",
-                                "now_2": f"{live_away:.2f}" if live_away else "N/A",
-                                "drift_1": f"{live_home - opening_home:+.2f}" if live_home and opening_home else "N/A",
-                                "drift_x": f"{live_draw - opening_draw:+.2f}" if live_draw and opening_draw else "N/A",
-                                "drift_2": f"{live_away - opening_away:+.2f}" if live_away and opening_away else "N/A",
-                                "prob_shift": f"{prob_shift:+.1f}",
-                                "reason": f"Home Win odds dropped by {drop_home:.1f}% while tied."
-                            })
-                            
-                    # Check Away Win odds drop
-                    if opening_away and live_away and config.MIN_ODDS <= live_away <= config.MAX_ODDS:
-                        drop_away = cls.calculate_drop_pct(opening_away, live_away)
-                        if drop_away >= config.ODDS_DROP_THRESHOLD_PCT:
-                            prob_open = (1.0 / opening_away) * 100
-                            prob_live = (1.0 / live_away) * 100
-                            prob_shift = prob_live - prob_open
-                            
-                            # Confidence cap at 80% for 1X2 picks
-                            confidence = min(80, int(70 + (drop_away - config.ODDS_DROP_THRESHOLD_PCT) * 1.5))
-                            
-                            predictions.append({
-                                "market": market_name,
-                                "prediction": "2",
-                                "confidence": confidence,
-                                "open_1": f"{opening_home:.2f}" if opening_home else "N/A",
-                                "open_x": f"{opening_draw:.2f}" if opening_draw else "N/A",
-                                "open_2": f"{opening_away:.2f}" if opening_away else "N/A",
-                                "now_1": f"{live_home:.2f}" if live_home else "N/A",
-                                "now_x": f"{live_draw:.2f}" if live_draw else "N/A",
-                                "now_2": f"{live_away:.2f}" if live_away else "N/A",
-                                "drift_1": f"{live_home - opening_home:+.2f}" if live_home and opening_home else "N/A",
-                                "drift_x": f"{live_draw - opening_draw:+.2f}" if live_draw and opening_draw else "N/A",
-                                "drift_2": f"{live_away - opening_away:+.2f}" if live_away and opening_away else "N/A",
-                                "prob_shift": f"{prob_shift:+.1f}",
-                                "reason": f"Away Win odds dropped by {drop_away:.1f}% while tied."
-                            })
 
             # --- STRATEGY 2: Rating-based (Alg.1) Deviation ---
             # FILTER A: Block Soccer Totals after 75th minute (too late, pace unreliable)
