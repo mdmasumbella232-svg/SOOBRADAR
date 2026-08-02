@@ -458,19 +458,19 @@ class PredictionEngine:
                                 # FILTER E: Soccer Over — block goal-induced line movements
                                 # When goals are scored, the total line mechanically adjusts upward.
                                 # This is NOT a predictive signal — the market is just repricing.
-                                # AGGRESSIVE MODE: Only block when the line movement is EXACTLY proportional
-                                # to goals scored — meaning the market is just repricing, not signaling.
-                                # Relaxed from 0.5*goals to 0.8*goals — only block when line_diff >= 80% of goals.
+                                # Block when the line movement is roughly proportional to goals scored.
+                                # Threshold: line_diff must be >= 0.5*goals AND <= goals + 0.25
+                                # This blocks "line 2.75→3.75, goals=2" (1.0 >= 1.0) and "line 3→6.75, goals=6" (3.75 >= 3.0)
+                                # but NOT "line 3.5→3.75, goals=1" (0.25 < 0.5) — small moves are genuine signals
                                 # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
                                     total_goals = latest_odds_home + latest_odds_away
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
-                                        # Only block when line moved up almost exactly proportional to goals
-                                        # Threshold: line_diff must be >= 0.8 * goals AND <= goals + 0.25
-                                        # This blocks "line 2→4.75, goals=4" (2.75 >= 3.2) but NOT "line 2.5→3.25, goals=2" (0.75 < 1.6)
-                                        # Small movements like 0.25-0.75 with 1-2 goals are NOT blocked — they're signals
-                                        if line_diff_val >= total_goals * 0.8 and line_diff_val <= total_goals + 0.25:
+                                        # Block when line moved up proportional to goals (goal-induced repricing)
+                                        # 0.5*goals threshold: with 2 goals, blocks if line_diff >= 1.0 (0.5 per goal)
+                                        # With 1 goal, only blocks if line_diff >= 0.5 (significant movement)
+                                        if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
                                             log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
                                             continue
                                     # Cap Soccer Over line at 4.50 — lines above this are extremely high
