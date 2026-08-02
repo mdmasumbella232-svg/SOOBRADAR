@@ -461,10 +461,11 @@ class PredictionEngine:
                                 # Key insight: Over 3.0 with 2 goals already scored needs 2 MORE goals
                                 # (total 4+) to WIN, not 1. With 3 total goals it's only a PUSH.
                                 # So when goals already cover most of the line, the Over is goal-induced.
-                                # Three checks to catch goal-induced Over picks:
-                                #   Check 1: line_diff proportional to goals (original check)
-                                #   Check 2: goals-to-line ratio >= 0.5 (goals already cover 50%+ of line)
-                                #   Check 3: line above expected at current minute (line spiked then decayed)
+                                # Two checks to catch goal-induced Over picks:
+                                #   Check 1: line_diff proportional to goals (catches big line jumps)
+                                #   Check 2: goals-to-line ratio >= 0.5 (catches goals covering 50%+ of line)
+                                # Check 3 (line above expected) was REMOVED — caused false positives
+                                # on legitimate picks like Over 2.5 at 50' with 1-0 (line rose 2.25→2.5).
                                 # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
                                     total_goals = latest_odds_home + latest_odds_away
@@ -486,15 +487,6 @@ class PredictionEngine:
                                         if live_line > 0 and (total_goals / live_line) >= 0.5:
                                             log(f"[SKIP] Soccer Over blocked: goals-to-line ratio too high (goals={total_goals}, line={live_line}, ratio={total_goals/live_line:.2f})")
                                             continue
-                                        # Check 3: Line above expected at current minute
-                                        # When goals are scored, the line spikes up then decays. The net change
-                                        # from opening may be small, but the line is still above expected.
-                                        if match_minute is not None and match_minute > 0 and live_line > 0:
-                                            expected_remaining = opening_line * (90 - match_minute) / 90.0
-                                            expected_line = total_goals + expected_remaining
-                                            if live_line >= expected_line + 0.5:
-                                                log(f"[SKIP] Soccer Over blocked: line above expected at {match_minute}' (line={live_line}, expected={expected_line:.2f}, goals={total_goals})")
-                                                continue
                                     # Cap Soccer Over line at 4.50 — lines above this are extremely high
                                     # and almost always result from goal-induced adjustments
                                     # Raised from 3.75 to 4.50 for aggressive mode
