@@ -443,20 +443,25 @@ class PredictionEngine:
                                 if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
                                     continue
                                     
-                                # FILTER D: Require Odds Movement — odds must have dropped below their opening price
-                                if relevant_opening_odds is not None and relevant_live_odds >= relevant_opening_odds:
-                                    continue
+                                # FILTER D: REMOVED — too strict, was blocking legitimate picks
+                                # The Alg.1 rating is already a strong signal; requiring odds movement
+                                # on top of that was too restrictive and caused the bot to find no picks
+                                # from 70+ games. The odds range filter (1.55-2.20) still protects quality.
 
                                 # FILTER E: Soccer Over — block goal-induced line movements
                                 # When goals are scored, the total line mechanically adjusts upward.
                                 # This is NOT a predictive signal — the market is just repricing.
-                                # Only pick Over when the line movement exceeds what goals explain.
+                                # Only block when the line movement is SIGNIFICANT relative to goals.
+                                # Small movements (e.g., 0.25 with 1 goal) are NOT goal-induced — they're signals.
                                 # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
                                     total_goals = latest_odds_home + latest_odds_away
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
-                                        if line_diff_val > 0 and line_diff_val <= total_goals + 0.25:
+                                        # Only block when line moved up significantly AND is within goal range
+                                        # Threshold: line_diff must be >= 0.5 * goals AND <= goals + 0.25
+                                        # This blocks "line 3→6.75, goals=6" (3.75 >= 3.0) but NOT "line 3.5→3.75, goals=1" (0.25 < 0.5)
+                                        if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
                                             log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
                                             continue
                                     # Cap Soccer Over line at 3.75 — lines above this are extremely high
