@@ -449,7 +449,8 @@ class PredictionEngine:
                     pass
 
             if market_name != "Total":
-                no_signal_reasons.append(f"market={market_name} (not Total)")
+                # Skip non-Total markets silently — only Total matters for our strategies
+                continue
             elif soccer_late_game:
                 no_signal_reasons.append("S2: soccer late game (75'+)")
             elif basketball_late:
@@ -460,40 +461,52 @@ class PredictionEngine:
                     no_signal_reasons.append("S2: no rating data")
                 else:
                     rating_detail = ratings[0]
-                    if not isinstance(rating_detail, dict):
-                        no_signal_reasons.append("S2: rating not dict")
-                    else:
+                    # Handle different rating formats from API:
+                    # Format 1: {"rating": 0.06, "direction": "Over"} (dict)
+                    # Format 2: 0.06 (just a number — use sign as direction)
+                    # Format 3: "0.06" (string — parse as float)
+                    rating_val = None
+                    direction = None
+                    if isinstance(rating_detail, dict):
                         rating_val = rating_detail.get("rating")
                         direction = rating_detail.get("direction")
+                    elif isinstance(rating_detail, (int, float)):
+                        rating_val = float(rating_detail)
+                    elif isinstance(rating_detail, str):
+                        try:
+                            rating_val = float(rating_detail)
+                        except (ValueError, TypeError):
+                            no_signal_reasons.append(f"S2: rating is unparseable string '{rating_detail}'")
+                            continue
 
-                        if rating_val is None:
-                            no_signal_reasons.append("S2: rating value is None")
+                    if rating_val is None:
+                        no_signal_reasons.append("S2: rating value is None")
+                    else:
+                        abs_rating = abs(rating_val)
+                        if abs_rating < config.MIN_ALG1_RATING_THRESHOLD:
+                            no_signal_reasons.append(f"S2: rating {rating_val:+.2f} < {config.MIN_ALG1_RATING_THRESHOLD}")
                         else:
-                            abs_rating = abs(rating_val)
-                            if abs_rating < config.MIN_ALG1_RATING_THRESHOLD:
-                                no_signal_reasons.append(f"S2: rating {rating_val:+.2f} < {config.MIN_ALG1_RATING_THRESHOLD}")
-                            else:
-                                dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
+                            dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
 
-                                opening_over = earliest_live.get("row1") or first_prematch.get("row1")
-                                opening_line = earliest_live.get("row2") or first_prematch.get("row2")
-                                opening_under = earliest_live.get("row3") or first_prematch.get("row3")
+                            opening_over = earliest_live.get("row1") or first_prematch.get("row1")
+                            opening_line = earliest_live.get("row2") or first_prematch.get("row2")
+                            opening_under = earliest_live.get("row3") or first_prematch.get("row3")
 
-                                live_over = latest_live.get("row1")
-                                live_line = latest_live.get("row2")
-                                live_under = latest_live.get("row3")
+                            live_over = latest_live.get("row1")
+                            live_line = latest_live.get("row2")
+                            live_under = latest_live.get("row3")
 
-                                # Determine the relevant live and opening odds for the predicted direction
-                                relevant_live_odds = live_over if dir_word == "Over" else live_under
-                                relevant_opening_odds = opening_over if dir_word == "Over" else opening_under
-                                
-                                # Enforce odds range filter — skip if outside 1.65–2.10
-                                if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
-                                    if relevant_live_odds is None:
-                                        no_signal_reasons.append(f"S2: {dir_word} odds is None")
-                                    else:
-                                        no_signal_reasons.append(f"S2: {dir_word} odds {relevant_live_odds:.2f} outside [{config.MIN_ODDS}-{config.MAX_ODDS}]")
-                                    continue
+                            # Determine the relevant live and opening odds for the predicted direction
+                            relevant_live_odds = live_over if dir_word == "Over" else live_under
+                            relevant_opening_odds = opening_over if dir_word == "Over" else opening_under
+                            
+                            # Enforce odds range filter — skip if outside 1.65–2.10
+                            if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
+                                if relevant_live_odds is None:
+                                    no_signal_reasons.append(f"S2: {dir_word} odds is None")
+                                else:
+                                    no_signal_reasons.append(f"S2: {dir_word} odds {relevant_live_odds:.2f} outside [{config.MIN_ODDS}-{config.MAX_ODDS}]")
+                                continue
                                     
                                 # FILTER D: REMOVED — too strict, was blocking legitimate picks
                                 # The Alg.1 rating is already a strong signal; requiring odds movement
@@ -501,54 +514,21 @@ class PredictionEngine:
                                 # from 70+ games. The odds range filter (1.55-2.20) still protects quality.
 
                                 # FILTER E: Soccer Over — block goal-induced line movements
-                                # When goals are scored, the total line mechanically adjusts upward.
-                                # This is NOT a predictive signal — the market is just repricing.
-                                # Key insight: Over 3.0 with 2 goals already scored needs 2 MORE goals
-                                # (total 4+) to WIN, not 1. With 3 total goals it's only a PUSH.
-                                # So when goals already cover most of the line, the Over is goal-induced.
-                                # Two checks to catch goal-induced Over picks:
-                                #   Check 1: line_diff proportional to goals (catches big line jumps)
-                                #   Check 2: goals-to-line ratio >= 0.5 (catches goals covering 50%+ of line)
-                                # Check 3 (line above expected) was REMOVED — caused false positives
-                                # on legitimate picks like Over 2.5 at 50' with 1-0 (line rose 2.25→2.5).
-                                # Use latest_odds score (more current than game list) to avoid false signals.
                                 if sport_id == config.SPORT_SOCCER and dir_word == "Over":
                                     total_goals = latest_odds_home + latest_odds_away
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
-                                        # Check 1: Block when line moved up proportional to goals (goal-induced repricing)
-                                        # 0.5*goals threshold: with 2 goals, blocks if line_diff >= 1.0 (0.5 per goal)
-                                        # With 1 goal, only blocks if line_diff >= 0.5 (significant movement)
-                                        # This blocks: Over 3.75 at 42' with 2-0 (line 2.75→3.75, diff=1.0, 1.0>=1.0)
                                         if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
                                             log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
                                             continue
-                                        # Check 2: Goals-to-line ratio — if 50%+ of the line is already goals,
-                                        # the Over needs too many additional goals to win.
-                                        # Over 3.0 with 2 goals → needs 2 MORE goals (total 4) to WIN, not 1.
-                                        # 2/3.0 = 0.67 → BLOCKED (correct — this was a PUSH, not a WIN)
-                                        # Over 2.5 at 30' with 1-0 → 1/2.5 = 0.40 → NOT BLOCKED (legitimate)
-                                        # Over 3.5 at 20' with 1-0 → 1/3.5 = 0.29 → NOT BLOCKED (legitimate)
                                         if live_line > 0 and (total_goals / live_line) >= 0.5:
                                             log(f"[SKIP] Soccer Over blocked: goals-to-line ratio too high (goals={total_goals}, line={live_line}, ratio={total_goals/live_line:.2f})")
                                             continue
-                                    # Cap Soccer Over line at 4.50 — lines above this are extremely high
-                                    # and almost always result from goal-induced adjustments
-                                    # Raised from 3.75 to 4.50 for aggressive mode
                                     if live_line is not None and live_line > 4.50:
                                         log(f"[SKIP] Soccer Over blocked: line too high ({live_line} > 4.50)")
                                         continue
 
                                     # FILTER F: Soccer Over — block weak halftime Over picks
-                                    # At halftime (40-55') with 0-1 goals, picking Over is a bad bet.
-                                    # You need 2+ MORE goals in the second half — that's asking too much
-                                    # from a weak 0.30 Alg.1 signal with no market confirmation.
-                                    # Real examples this blocks:
-                                    #   Over 2.5 at 45' with 1-0 (Slovenia) — line dropped 2.75→2.5, market says Under
-                                    #   Over 2.5 at 45' with 0-1 (Venezuela) — line flat 2.5→2.5, no movement
-                                    # Legitimate picks NOT blocked:
-                                    #   Over 2.5 at 45' with 2-0 (2 goals) — already on pace for Over
-                                    #   Over 2.5 at 30' with 1-0 — still 60 minutes left, reasonable
                                     if total_goals <= 1 and match_minute >= 40 and match_minute <= 55:
                                         log(f"[SKIP] Soccer Over blocked: halftime with ≤1 goal (goals={total_goals}, minute={match_minute}, need 2+ more goals in 2nd half)")
                                         continue
@@ -559,23 +539,16 @@ class PredictionEngine:
                                         current_total = latest_odds_home + latest_odds_away
                                         pace_ratio = current_total / live_line
                                         if dir_word == "Over":
-                                            # Current total must already be at least 60% of line
                                             if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
                                                 no_signal_reasons.append(f"S2: pace too low ({pace_ratio:.0%} < 60%)")
                                                 continue
-                                            # For Soccer: current goal rate must project to at least 75% of line by 90'
-                                            # Lowered from 90% to 75% — aggressive mode, allow more Over picks
-                                            # The Alg.1 rating is already a strong signal; pace filter was too strict
                                             if sport_id == config.SPORT_SOCCER:
-                                                # Use the match minute we already computed earlier
                                                 safe_minute = max(1, match_minute)
                                                 projected_goals = (current_total / safe_minute) * 90
                                                 if projected_goals < live_line * 0.75:
                                                     no_signal_reasons.append(f"S2: projected {projected_goals:.1f} < {live_line*0.75:.1f} (75% of line)")
                                                     continue
                                         elif dir_word == "Under":
-                                            # For Under: current total must be <= 55% of line (still safely under)
-                                            # Stricter threshold (was 70%) — Q3+ games already blocked above
                                             if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.55:
                                                 no_signal_reasons.append(f"S2: pace too high for Under ({pace_ratio:.0%} > 55%)")
                                                 continue
@@ -791,6 +764,73 @@ class PredictionEngine:
                                     "alg_dir": "Under",
                                     "reason": f"0-0 at {s6_minute}' with line {live_line_s6}. No scoring for 30+ minutes — market overpricing goals."
                                 })
+
+            # --- STRATEGY 7: Line Movement (No rating needed — pure market signal) ---
+            # When the Total line moves significantly during live play, the market is
+            # signaling a shift in expectations. This is a strong signal that doesn't
+            # depend on the Alg.1 rating data.
+            # Over signal: line rises 0.5+ (market expects more goals) — only if no goals scored yet
+            # Under signal: line drops 0.25+ (market expects fewer goals) — only if no goals scored yet
+            # This catches games where the rating is weak or missing but the line movement is clear.
+            if sport_id == config.SPORT_SOCCER and market_name == "Total" and not soccer_late_game:
+                s7_opening_line = earliest_live.get("row2") or first_prematch.get("row2")
+                s7_live_line = latest_live.get("row2")
+                s7_live_over = latest_live.get("row1")
+                s7_live_under = latest_live.get("row3")
+                if s7_opening_line is not None and s7_live_line is not None and s7_opening_line > 0:
+                    s7_line_diff = s7_live_line - s7_opening_line
+                    s7_total_goals = latest_odds_home + latest_odds_away
+                    try:
+                        s7_minute = int(match.get("time", {}).get("tm", 0))
+                    except (ValueError, TypeError):
+                        s7_minute = 0
+                    if 5 <= s7_minute <= 74:  # Not too early, not too late
+                        # Under signal: line dropped 0.25+ and no goals scored yet
+                        # Market is pricing in fewer goals — the Under is a value play
+                        if s7_line_diff <= -0.25 and s7_total_goals == 0:
+                            if s7_live_under is not None and config.MIN_ODDS <= s7_live_under <= config.MAX_ODDS:
+                                already_picked = any(p.get("total_dir") == "Under" and p.get("total_line") == f"{s7_live_line}" for p in predictions)
+                                if not already_picked:
+                                    predictions.append({
+                                        "market": market_name,
+                                        "prediction": f"Under {s7_live_line}",
+                                        "confidence": 82,
+                                        "total_dir": "Under",
+                                        "total_line": f"{s7_live_line}",
+                                        "open_line": f"{s7_opening_line}",
+                                        "now_line": f"{s7_live_line}",
+                                        "line_diff": f"{s7_line_diff:+.2f}",
+                                        "open_over": f"{earliest_live.get('row1', 0):.2f}" if earliest_live.get('row1') else "N/A",
+                                        "now_over": f"{s7_live_over:.2f}" if s7_live_over else "N/A",
+                                        "open_under": f"{earliest_live.get('row3', 0):.2f}" if earliest_live.get('row3') else "N/A",
+                                        "now_under": f"{s7_live_under:.2f}",
+                                        "alg_val": "Line_Move",
+                                        "alg_dir": "Under",
+                                        "reason": f"Line dropped {s7_opening_line}→{s7_live_line} ({s7_line_diff:+.2f}) with 0 goals at {s7_minute}'. Market expects fewer goals."
+                                    })
+                        # Over signal: line rose 0.5+ and no goals scored yet (not goal-induced)
+                        # Market is pricing in more goals — the Over is a value play
+                        elif s7_line_diff >= 0.5 and s7_total_goals == 0:
+                            if s7_live_over is not None and config.MIN_ODDS <= s7_live_over <= config.MAX_ODDS:
+                                already_picked = any(p.get("total_dir") == "Over" and p.get("total_line") == f"{s7_live_line}" for p in predictions)
+                                if not already_picked:
+                                    predictions.append({
+                                        "market": market_name,
+                                        "prediction": f"Over {s7_live_line}",
+                                        "confidence": 82,
+                                        "total_dir": "Over",
+                                        "total_line": f"{s7_live_line}",
+                                        "open_line": f"{s7_opening_line}",
+                                        "now_line": f"{s7_live_line}",
+                                        "line_diff": f"{s7_line_diff:+.2f}",
+                                        "open_over": f"{s7_live_over:.2f}",
+                                        "now_over": f"{s7_live_over:.2f}",
+                                        "open_under": f"{earliest_live.get('row3', 0):.2f}" if earliest_live.get('row3') else "N/A",
+                                        "now_under": f"{s7_live_under:.2f}" if s7_live_under else "N/A",
+                                        "alg_val": "Line_Move",
+                                        "alg_dir": "Over",
+                                        "reason": f"Line rose {s7_opening_line}→{s7_live_line} (+{s7_line_diff:.2f}) with 0 goals at {s7_minute}'. Market expects more goals."
+                                    })
 
         if not no_signal_reasons:
             no_signal_reasons.append("no strategy triggered")

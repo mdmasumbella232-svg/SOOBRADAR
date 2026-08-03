@@ -23,7 +23,7 @@ MAX_ODDS = 2.10             # Maximum acceptable odds for any bet
 # ODDS_DROP_THRESHOLD_PCT = 20.0  # No longer used
 
 # Strategy 2 (Alg.1 Totals) Config
-MIN_ALG1_RATING_THRESHOLD = 0.3 # Lowered from 0.5 — catch more signals (Alg.1 + odds range filter still protects quality)
+MIN_ALG1_RATING_THRESHOLD = 0.05 # Lowered from 0.3 — actual API ratings are 0.06-0.07, threshold was too strict
 
 # Strategy 3 (Abnormal Halftime Line) Config
 HT_ABNORMAL_LINE_GAP_THRESHOLD = 1.0 # Line must be at least this much higher than expected HT line
