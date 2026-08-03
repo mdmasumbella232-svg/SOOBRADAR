@@ -8,6 +8,7 @@ import urllib.request
 import urllib.parse
 import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     import config
 except ImportError:
@@ -41,47 +42,151 @@ LOCK_FILE = "lock_state.json"
 STATS_FILE = "stats.json"
 
 class ProxyManager:
-    """Manages proxy rotation for API requests.
-    Uses per-request opener instead of global install_opener to avoid
-    interfering with other urllib calls (e.g. proxy list fetch itself).
-    Supports forced direct connection mode for fallback when proxies fail."""
+    """Manages proxy rotation for API requests with pre-validation.
+    
+    Key improvements:
+    - Pre-validates proxies at startup by testing against the actual API
+    - Maintains a separate pool of validated (working) proxies
+    - Falls back to unvalidated proxies if validated pool is exhausted
+    - Faster rotation: no delays between proxy switches
+    - Multiple proxy sources for better coverage
+    """
     def __init__(self):
-        self.proxies = []
+        self.raw_proxies = []       # All fetched proxies (unvalidated)
+        self.valid_proxies = []     # Proxies that passed API validation
+        self.failed_proxies = set() # Proxies that failed during validation or use
         self.current_proxy = None
-        self.proxy_api_url = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
+        self.proxy_sources = [
+            "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+            "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+        ]
         self._lock = threading.Lock()
-        self.force_direct = False  # When True, skip proxy and use direct connection
+        self.force_direct = False
         self.direct_fail_count = 0  # Track consecutive direct connection failures
         self.proxy_fail_count = 0   # Track consecutive proxy failures
+        self.validated = False      # Whether we've done initial validation
+        self.validation_in_progress = False
 
     def fetch_proxies(self):
+        """Fetch proxies from multiple sources for better coverage."""
+        all_proxies = set()
+        for source_url in self.proxy_sources:
+            try:
+                req = urllib.request.Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as response:
+                    text = response.read().decode('utf-8')
+                    for line in text.split('\n'):
+                        p = line.strip()
+                        if not p:
+                            continue
+                        # Strip http:// prefix if present
+                        p = p.replace("http://", "")
+                        # Basic format check: should be ip:port
+                        if ':' in p and not p.startswith('#'):
+                            all_proxies.add(p)
+            except Exception as e:
+                log(f"[PROXY] Failed to fetch from {source_url}: {e}", error=True)
+        
+        # Remove any previously failed proxies
+        self.raw_proxies = [p for p in all_proxies if p not in self.failed_proxies]
+        log(f"[PROXY] Fetched {len(self.raw_proxies)} unique proxies from {len(self.proxy_sources)} sources.")
+
+    def _test_proxy(self, proxy_addr):
+        """Test if a proxy can reach the API. Returns proxy_addr if working, None otherwise."""
         try:
-            req = urllib.request.Request(self.proxy_api_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as response:
-                text = response.read().decode('utf-8')
-                # Filter for HTTP proxies and strip the 'http://' prefix for urllib compat
-                self.proxies = [
-                    p.strip().replace("http://", "") 
-                    for p in text.split('\n') 
-                    if p.strip().startswith("http://")
-                ]
-                log(f"[PROXY] Fetched {len(self.proxies)} HTTP proxies from iplocate GitHub.")
-        except Exception as e:
-            log(f"[PROXY] Failed to fetch iplocate proxies: {e}", error=True)
-            self.proxies = []
+            https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': f"http://{proxy_addr}",
+                'https': f"http://{proxy_addr}"
+            })
+            opener = urllib.request.build_opener(proxy_handler, https_handler)
+            # Test against the actual API endpoint (lightweight request)
+            test_url = f"{config.BASE_URL.rstrip('/')}/{config.API_ROOT.strip('/')}/live_games?sport_id=1&page=1&per_page=1"
+            req = urllib.request.Request(test_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json'
+            })
+            with opener.open(req, timeout=8) as response:
+                if response.status == 200:
+                    return proxy_addr
+        except Exception:
+            pass
+        return None
+
+    def validate_proxies(self, max_test=40, max_workers=10):
+        """Pre-validate proxies by testing them against the actual API.
+        Tests up to max_test proxies concurrently, keeps only the ones that work.
+        This is called at startup and when the valid pool is exhausted."""
+        if self.validation_in_progress:
+            return
+        self.validation_in_progress = True
+        
+        if not self.raw_proxies:
+            self.fetch_proxies()
+        
+        if not self.raw_proxies:
+            log("[PROXY] No proxies available for validation.", error=True)
+            self.validation_in_progress = False
+            return
+        
+        import random
+        # Pick a random sample to test (don't test all 900+)
+        test_pool = random.sample(self.raw_proxies, min(max_test, len(self.raw_proxies)))
+        log(f"[PROXY] Testing {len(test_pool)} proxies against API (max {max_workers} concurrent)...")
+        
+        working = []
+        tested = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._test_proxy, p): p for p in test_pool}
+            for future in as_completed(futures, timeout=120):
+                tested += 1
+                result = future.result()
+                if result:
+                    working.append(result)
+                    log(f"[PROXY] ✓ Valid proxy found: {result} ({len(working)} working, {tested}/{len(test_pool)} tested)")
+                else:
+                    self.failed_proxies.add(futures[future])
+        
+        with self._lock:
+            self.valid_proxies = working
+            # Remove failed proxies from raw pool too
+            self.raw_proxies = [p for p in self.raw_proxies if p not in self.failed_proxies]
+        
+        self.validated = True
+        self.validation_in_progress = False
+        
+        if working:
+            log(f"[PROXY] Validation complete: {len(working)}/{tested} proxies working. Valid pool ready.")
+            # Set current proxy to the first working one
+            self.current_proxy = working[0]
+            self.valid_proxies = working[1:]  # Remove from pool (will be used on rotation)
+            log(f"[PROXY] Using validated proxy: {self.current_proxy} ({len(self.valid_proxies)} in reserve)")
+        else:
+            log(f"[PROXY] Validation complete: 0/{tested} proxies working! Will try DIRECT fallback.", error=True)
+            self.current_proxy = None
 
     def rotate_proxy(self):
         with self._lock:
-            if not self.proxies:
-                self.fetch_proxies()
-            
-            if self.proxies:
-                import random
-                self.current_proxy = random.choice(self.proxies)
-                self.proxies.remove(self.current_proxy)
+            # First try valid (pre-tested) proxies
+            if self.valid_proxies:
+                self.current_proxy = self.valid_proxies.pop(0)
                 self.proxy_fail_count = 0
                 self.force_direct = False
-                log(f"[PROXY] Rotating to new iplocate proxy: {self.current_proxy} ({len(self.proxies)} remaining)")
+                log(f"[PROXY] Rotating to validated proxy: {self.current_proxy} ({len(self.valid_proxies)} in reserve)")
+                return True
+            
+            # Then try raw proxies (not pre-tested)
+            if not self.raw_proxies:
+                self.fetch_proxies()
+            
+            if self.raw_proxies:
+                import random
+                self.current_proxy = random.choice(self.raw_proxies)
+                self.raw_proxies.remove(self.current_proxy)
+                self.proxy_fail_count = 0
+                self.force_direct = False
+                log(f"[PROXY] Rotating to unvalidated proxy: {self.current_proxy} ({len(self.raw_proxies)} remaining)")
                 return True
             else:
                 log("[PROXY] No proxies available. Using direct connection.")
@@ -89,8 +194,7 @@ class ProxyManager:
                 return False
 
     def toggle_direct_mode(self, enable):
-        """Switch between proxy and direct connection mode.
-        When proxies fail, we fall back to direct; when direct fails, we go back to proxy."""
+        """Switch between proxy and direct connection mode."""
         with self._lock:
             self.force_direct = enable
             if enable:
@@ -100,9 +204,7 @@ class ProxyManager:
                 log("[PROXY] Switched back to PROXY mode")
 
     def get_opener(self, use_direct=False):
-        """Build a per-request opener with the current proxy and SSL context.
-        HTTPSHandler is used to embed the ssl_ctx so opener.open() doesn't need context= kwarg.
-        use_direct=True forces direct connection regardless of proxy state."""
+        """Build a per-request opener with the current proxy and SSL context."""
         with self._lock:
             https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
             if self.current_proxy and not self.force_direct and not use_direct:
@@ -119,7 +221,15 @@ proxy_manager = ProxyManager()
 
 class InforadarAPIClient:
     """Lightweight client for inforadar.live API using standard library to minimize RAM/CPU usage.
-    Includes retry logic with exponential backoff and per-request proxy support."""
+    Includes retry logic with fast failover and per-request proxy support.
+    
+    Key improvements:
+    - If validated proxies exist, use them directly (skip DIRECT)
+    - If no validated proxies, try DIRECT first (1 attempt, 10s timeout), then PROXY
+    - Retry delays are minimal (0.5s) — no more wasting 4s between retries
+    - If PROXY fails, rotate immediately to next proxy (no delay)
+    - If all retries fail, re-validate proxies if pool is exhausted
+    """
     def __init__(self):
         self.base_url = config.BASE_URL.rstrip('/')
         self.api_root = config.API_ROOT.strip('/')
@@ -128,8 +238,8 @@ class InforadarAPIClient:
             'Accept': 'application/json'
         }
         self.consecutive_errors = {}  # Track errors per sport_id to avoid cross-sport reset
-        self.max_retries = 3  # Number of retries per request
-        self.retry_backoff_base = 2  # Seconds for first retry delay
+        self.max_retries = 2  # Number of retries per request (reduced from 3 — fail fast)
+        self._revalidate_counter = 0  # Track how many times we've exhausted proxies
 
     def _request(self, endpoint, params=None, max_retries=None, sport_id=None):
         url = f"{self.base_url}/{self.api_root}/{endpoint.lstrip('/')}"
@@ -140,32 +250,35 @@ class InforadarAPIClient:
         retries = max_retries if max_retries is not None else self.max_retries
         error_key = sport_id if sport_id is not None else "default"
         
-        # SMART RETRY: Try DIRECT first (1 attempt, fast timeout).
-        # If DIRECT fails, switch to PROXY immediately — don't waste time retrying DIRECT.
-        # Previous logic tried DIRECT twice (50s wasted) before falling back to PROXY.
-        # Also: if DIRECT failed recently (direct_fail_count > 0), start with PROXY.
-        direct_failed_recently = proxy_manager.direct_fail_count > 0
+        # SMART RETRY STRATEGY:
+        # 1. If we have validated proxies, use them directly (skip DIRECT)
+        # 2. If no validated proxies, try DIRECT first (1 attempt, 10s timeout), then PROXY
+        # 3. If DIRECT failed 3+ times recently, skip DIRECT entirely
+        # 4. Retry delays are minimal (0.5s) — no more wasting 2-4s between retries
+        has_valid_proxy = proxy_manager.validated and proxy_manager.current_proxy is not None
+        direct_failed_recently = proxy_manager.direct_fail_count >= 3
         
         for attempt in range(retries + 1):
             try:
-                # Decide mode: 
-                # - If DIRECT failed recently, start with PROXY
-                # - Otherwise, try DIRECT first (attempt 0), then PROXY for all retries
-                if direct_failed_recently:
-                    use_direct = False  # Skip DIRECT, go straight to PROXY
+                # Decide mode:
+                # - If we have a validated proxy, always use PROXY
+                # - If DIRECT failed 3+ times, skip DIRECT
+                # - Otherwise, try DIRECT first (attempt 0), then PROXY
+                if has_valid_proxy or direct_failed_recently:
+                    use_direct = False
                 else:
                     use_direct = (attempt == 0)  # Only 1 DIRECT attempt, then PROXY
                 
                 opener = proxy_manager.get_opener(use_direct=use_direct)
-                # Shorter timeout for DIRECT (fail fast), longer for PROXY
+                # Shorter timeout for DIRECT (fail fast), reasonable for PROXY
                 timeout = config.REQUEST_TIMEOUT_SECONDS
                 if use_direct:
-                    timeout = min(timeout, 12)  # 12s max for DIRECT — fail fast
+                    timeout = min(timeout, 10)  # 10s max for DIRECT — fail fast
                 else:
                     if endpoint == "live_games":
-                        timeout = max(timeout, 20)  # 20s for live_games via PROXY
+                        timeout = max(timeout, 15)  # 15s for live_games via PROXY
                     elif "game/odds" in endpoint:
-                        timeout = max(timeout, 18)  # 18s for game odds via PROXY
+                        timeout = max(timeout, 12)  # 12s for game odds via PROXY (reduced from 18)
                 with opener.open(req, timeout=timeout) as response:
                     if response.status == 200:
                         self.consecutive_errors[error_key] = 0
@@ -188,10 +301,10 @@ class InforadarAPIClient:
                     proxy_manager.rotate_proxy()
                 
                 if attempt < retries:
-                    delay = min(self.retry_backoff_base * (2 ** attempt), 4)  # 2, 4, 4s max
+                    # Minimal delay — 0.5s instead of 2-4s
                     mode = "DIRECT" if use_direct else "PROXY"
-                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, mode={mode}, retrying in {delay}s)", error=True)
-                    time.sleep(delay)
+                    log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, mode={mode}, retrying in 0.5s)", error=True)
+                    time.sleep(0.5)
                     continue
                 else:
                     mode = "DIRECT" if use_direct else "PROXY"
@@ -200,8 +313,13 @@ class InforadarAPIClient:
                 
                 if self.consecutive_errors.get(error_key, 0) >= 3:
                     sport_name = f"Sport {sport_id}" if sport_id is not None else "API"
-                    log(f"[API] 3 consecutive {sport_name} errors detected. Triggering automatic IP rotation...")
-                    proxy_manager.rotate_proxy()
+                    log(f"[API] 3 consecutive {sport_name} errors detected. Triggering proxy re-validation...")
+                    # If we're failing repeatedly, re-validate proxies
+                    self._revalidate_counter += 1
+                    if self._revalidate_counter <= 3:  # Don't re-validate more than 3 times per cycle
+                        proxy_manager.validate_proxies(max_test=20, max_workers=8)
+                    else:
+                        proxy_manager.rotate_proxy()
                     self.consecutive_errors[error_key] = 0
         return None
 
@@ -254,7 +372,37 @@ class InforadarAPIClient:
         sport_path = "soccer" if sport_id == config.SPORT_SOCCER else "basketball"
         # Soccer uses 8,5,6,1,2,3 markets, Basketball uses 4,5,6,1,2,3 markets
         markets = "8,5,6,1,2,3" if sport_id == config.SPORT_SOCCER else "4,5,6,1,2,3"
-        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=2, sport_id=sport_id)  # 2 retries — more chances to fetch odds before skipping
+        return self._request(f"{sport_path}/game/odds", {"event_id": event_id, "odds_market": markets}, max_retries=1, sport_id=sport_id)  # 1 retry — fail fast, move to next game
+
+    def fetch_odds_batch(self, sport_id, game_list, max_workers=5):
+        """Fetch odds for multiple games concurrently using ThreadPoolExecutor.
+        
+        This is MUCH faster than sequential fetching when there are 50+ games.
+        Instead of 50 × 3s = 150s sequential, we do 50 games in ~10 batches of 5 = ~30s.
+        Returns a dict of {event_id: odds_data} for games that were successfully fetched.
+        """
+        results = {}
+        if not game_list:
+            return results
+        
+        def _fetch_one(game):
+            eid = game.get("id")
+            if not eid:
+                return eid, None
+            odds = self.get_game_odds(sport_id, eid)
+            return eid, odds
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_fetch_one, g): g.get("id") for g in game_list}
+            for future in as_completed(futures, timeout=180):
+                try:
+                    eid, odds = future.result(timeout=30)
+                    if eid and odds:
+                        results[eid] = odds
+                except Exception:
+                    pass  # Skip failed fetches — we'll just miss that game this cycle
+        
+        return results
 
 
 class PredictionEngine:
@@ -529,81 +677,77 @@ class PredictionEngine:
                             relevant_live_odds = live_over if dir_word == "Over" else live_under
                             relevant_opening_odds = opening_over if dir_word == "Over" else opening_under
                             
-                            # Enforce odds range filter — skip if outside 1.65–2.10
+                            # --- FILTER E: Soccer Over — block goal-induced line movements ---
+                            # Must be checked BEFORE odds range filter so we can log the reason
+                            if sport_id == config.SPORT_SOCCER and dir_word == "Over":
+                                total_goals = latest_odds_home + latest_odds_away
+                                if total_goals > 0 and opening_line is not None and live_line is not None:
+                                    line_diff_val = live_line - opening_line
+                                    if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
+                                        no_signal_reasons.append(f"S2: goal-induced (line {opening_line}→{live_line}, goals={total_goals})")
+                                        continue
+                                    if live_line > 0 and (total_goals / live_line) >= 0.5:
+                                        no_signal_reasons.append(f"S2: goals/line ratio {total_goals/live_line:.2f} (goals={total_goals}, line={live_line})")
+                                        continue
+                                if live_line is not None and live_line > 4.50:
+                                    no_signal_reasons.append(f"S2: line too high ({live_line} > 4.50)")
+                                    continue
+
+                                # FILTER F: Soccer Over — block weak halftime Over picks
+                                if total_goals <= 1 and match_minute >= 40 and match_minute <= 55:
+                                    no_signal_reasons.append(f"S2: halftime Over with ≤1 goal (goals={total_goals}, min={match_minute})")
+                                    continue
+
+                            # --- FILTER C: Score Feasibility — current score must be on pace for the bet ---
+                            if live_line is not None and live_line > 0:
+                                try:
+                                    current_total = latest_odds_home + latest_odds_away
+                                    pace_ratio = current_total / live_line
+                                    if dir_word == "Over":
+                                        if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
+                                            no_signal_reasons.append(f"S2: pace too low ({pace_ratio:.0%} < 60%)")
+                                            continue
+                                        if sport_id == config.SPORT_SOCCER:
+                                            safe_minute = max(1, match_minute)
+                                            projected_goals = (current_total / safe_minute) * 90
+                                            if projected_goals < live_line * 0.75:
+                                                no_signal_reasons.append(f"S2: projected {projected_goals:.1f} < {live_line*0.75:.1f} (75% of line)")
+                                                continue
+                                    elif dir_word == "Under":
+                                        if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.55:
+                                            no_signal_reasons.append(f"S2: pace too high for Under ({pace_ratio:.0%} > 55%)")
+                                            continue
+                                except (ZeroDivisionError, TypeError, NameError):
+                                    pass
+
+                            # --- Enforce odds range filter — skip if outside 1.65–2.10 ---
                             if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
                                 if relevant_live_odds is None:
                                     no_signal_reasons.append(f"S2: {dir_word} odds is None")
                                 else:
                                     no_signal_reasons.append(f"S2: {dir_word} odds {relevant_live_odds:.2f} outside [{config.MIN_ODDS}-{config.MAX_ODDS}]")
                                 continue
-                                    
-                                # FILTER D: REMOVED — too strict, was blocking legitimate picks
-                                # The Alg.1 rating is already a strong signal; requiring odds movement
-                                # on top of that was too restrictive and caused the bot to find no picks
-                                # from 70+ games. The odds range filter (1.55-2.20) still protects quality.
 
-                                # FILTER E: Soccer Over — block goal-induced line movements
-                                if sport_id == config.SPORT_SOCCER and dir_word == "Over":
-                                    total_goals = latest_odds_home + latest_odds_away
-                                    if total_goals > 0 and opening_line is not None and live_line is not None:
-                                        line_diff_val = live_line - opening_line
-                                        if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
-                                            no_signal_reasons.append(f"S2: goal-induced (line {opening_line}→{live_line}, goals={total_goals})")
-                                            continue
-                                        if live_line > 0 and (total_goals / live_line) >= 0.5:
-                                            no_signal_reasons.append(f"S2: goals/line ratio {total_goals/live_line:.2f} (goals={total_goals}, line={live_line})")
-                                            continue
-                                    if live_line is not None and live_line > 4.50:
-                                        no_signal_reasons.append(f"S2: line too high ({live_line} > 4.50)")
-                                        continue
+                            line_diff = live_line - opening_line if live_line is not None and opening_line is not None else 0.0
+                            confidence = min(99, int(70 + (abs_rating - config.MIN_ALG1_RATING_THRESHOLD) * 10))
 
-                                    # FILTER F: Soccer Over — block weak halftime Over picks
-                                    if total_goals <= 1 and match_minute >= 40 and match_minute <= 55:
-                                        no_signal_reasons.append(f"S2: halftime Over with ≤1 goal (goals={total_goals}, min={match_minute})")
-                                        continue
-
-                                # FILTER C: Score Feasibility — current score must be on pace for the bet
-                                if live_line is not None and live_line > 0:
-                                    try:
-                                        current_total = latest_odds_home + latest_odds_away
-                                        pace_ratio = current_total / live_line
-                                        if dir_word == "Over":
-                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
-                                                no_signal_reasons.append(f"S2: pace too low ({pace_ratio:.0%} < 60%)")
-                                                continue
-                                            if sport_id == config.SPORT_SOCCER:
-                                                safe_minute = max(1, match_minute)
-                                                projected_goals = (current_total / safe_minute) * 90
-                                                if projected_goals < live_line * 0.75:
-                                                    no_signal_reasons.append(f"S2: projected {projected_goals:.1f} < {live_line*0.75:.1f} (75% of line)")
-                                                    continue
-                                        elif dir_word == "Under":
-                                            if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.55:
-                                                no_signal_reasons.append(f"S2: pace too high for Under ({pace_ratio:.0%} > 55%)")
-                                                continue
-                                    except (ZeroDivisionError, TypeError, NameError):
-                                        pass
-
-                                line_diff = live_line - opening_line if live_line is not None and opening_line is not None else 0.0
-                                confidence = min(99, int(70 + (abs_rating - config.MIN_ALG1_RATING_THRESHOLD) * 10))
-
-                                predictions.append({
-                                    "market": market_name,
-                                    "prediction": f"{dir_word} {live_line}",
-                                    "confidence": confidence,
-                                    "total_dir": dir_word,
-                                    "total_line": f"{live_line}",
-                                    "open_line": f"{opening_line}" if opening_line is not None else "N/A",
-                                    "now_line": f"{live_line}" if live_line is not None else "N/A",
-                                    "line_diff": f"{line_diff:+.2f}" if line_diff != 0 else "0.0",
-                                    "open_over": f"{opening_over:.2f}" if opening_over is not None else "N/A",
-                                    "now_over": f"{live_over:.2f}" if live_over is not None else "N/A",
-                                    "open_under": f"{opening_under:.2f}" if opening_under is not None else "N/A",
-                                    "now_under": f"{live_under:.2f}" if live_under is not None else "N/A",
-                                    "alg_val": f"{rating_val:.2f}",
-                                    "alg_dir": f"{dir_word}",
-                                    "reason": f"Alg.1 Rating deviation detected: {rating_val:+.2f}."
-                                })
+                            predictions.append({
+                                "market": market_name,
+                                "prediction": f"{dir_word} {live_line}",
+                                "confidence": confidence,
+                                "total_dir": dir_word,
+                                "total_line": f"{live_line}",
+                                "open_line": f"{opening_line}" if opening_line is not None else "N/A",
+                                "now_line": f"{live_line}" if live_line is not None else "N/A",
+                                "line_diff": f"{line_diff:+.2f}" if line_diff != 0 else "0.0",
+                                "open_over": f"{opening_over:.2f}" if opening_over is not None else "N/A",
+                                "now_over": f"{live_over:.2f}" if live_over is not None else "N/A",
+                                "open_under": f"{opening_under:.2f}" if opening_under is not None else "N/A",
+                                "now_under": f"{live_under:.2f}" if live_under is not None else "N/A",
+                                "alg_val": f"{rating_val:.2f}",
+                                "alg_dir": f"{dir_word}",
+                                "reason": f"Alg.1 Rating deviation detected: {rating_val:+.2f}."
+                            })
 
             # --- STRATEGY 3: Abnormal Line Dynamics (Soccer Halftime) ---
             # IMPORTANT: Use latest_odds_home/latest_odds_away (from the latest odds entry),
@@ -1139,6 +1283,38 @@ def main():
     # Cache to store match states to avoid redundant odds fetches
     match_cache = {}
     
+    # --- PROXY PRE-VALIDATION AT STARTUP ---
+    # Test proxies against the API before entering the main loop.
+    # This avoids wasting 30-40s per game on dead proxies.
+    # First, test DIRECT connection to see if it's reachable.
+    log("[STARTUP] Testing DIRECT connection to API...")
+    try:
+        direct_opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_ctx))
+        test_url = f"{config.BASE_URL.rstrip('/')}/{config.API_ROOT.strip('/')}/live_games?sport_id=1&page=1&per_page=1"
+        test_req = urllib.request.Request(test_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json'
+        })
+        with direct_opener.open(test_req, timeout=10) as resp:
+            if resp.status == 200:
+                log("[STARTUP] DIRECT connection works! API is reachable without proxy.")
+                proxy_manager.direct_fail_count = 0
+            else:
+                log(f"[STARTUP] DIRECT connection returned HTTP {resp.status}. Will try proxy.", error=True)
+                proxy_manager.direct_fail_count = 3  # Skip DIRECT for now
+    except Exception as e:
+        log(f"[STARTUP] DIRECT connection failed: {e}. Will try proxy.", error=True)
+        proxy_manager.direct_fail_count = 3  # Skip DIRECT, go straight to PROXY
+    
+    log("[STARTUP] Pre-validating proxies against API...")
+    proxy_manager.validate_proxies(max_test=40, max_workers=10)
+    if proxy_manager.validated and proxy_manager.current_proxy:
+        log(f"[STARTUP] Proxy validation complete. Using validated proxy: {proxy_manager.current_proxy}")
+    elif proxy_manager.direct_fail_count < 3:
+        log("[STARTUP] No working proxies found. Will try DIRECT connection.")
+    else:
+        log("[STARTUP] WARNING: No working proxies AND DIRECT failed. Bot may struggle to connect.", error=True)
+    
     # Consecutive failure counter — auto-restart if API is unreachable for too long
     # When consecutive_failures >= threshold, bot exits and Render restarts it with a fresh IP
     consecutive_failures = 0
@@ -1370,11 +1546,10 @@ def main():
                     if live_games:
                         any_games_found = True
                     
+                    # --- PRE-FILTER: Remove games that can't trigger any strategy ---
+                    # This saves time when there are 100+ live games per sport
+                    filtered_games = []
                     for game in live_games:
-                        # Re-verify lock state inside loop in case it got locked in this iteration
-                        if load_lock_state().get("locked"):
-                            break
-                            
                         event_id = game.get("id")
                         if not event_id:
                             continue
@@ -1384,8 +1559,6 @@ def main():
                         if time_status in ["3", "4", "99", "10"]:
                             continue
                         
-                        # Pre-filter: skip games that can't trigger any strategy
-                        # This saves time when there are 100+ live games per sport
                         time_info = game.get("time", {})
                         scores = game.get("scores", "0-0")
                         
@@ -1395,18 +1568,14 @@ def main():
                             except (ValueError, TypeError):
                                 tm_val = 0
                             # Skip games past 75' — FILTER A blocks all soccer totals after 75'
-                            # No strategy triggers after 75' (Strategy 4 caps at 74', Strategy 6 caps at 70')
                             if tm_val >= 75:
                                 scan_prefiltered += 1
                                 continue
                             # Skip games before 2' — not enough data for any strategy
-                            # Soccer Rule 1 needs 0-10' but the game needs at least a couple minutes
-                            # to have a valid score and line movement
                             if tm_val < 2 and str(time_info.get("tm", "")) != "HT":
                                 scan_prefiltered += 1
                                 continue
                             # Skip games with 4+ total goals — almost no strategy triggers
-                            # and the Over line would be too high (filtered by line cap)
                             try:
                                 if "-" in str(scores):
                                     sp = str(scores).split("-")
@@ -1427,16 +1596,34 @@ def main():
                                 scan_prefiltered += 1
                                 continue
                         
+                        # Check cache — skip if we already analyzed this exact state
                         state_key = f"{scores}_{json.dumps(time_info)}"
-                        
                         if match_cache.get(event_id) == state_key:
                             scan_cached += 1
                             continue
-                        
                         match_cache[event_id] = state_key
                         
-                        odds_data = client.get_game_odds(sport_id, event_id)
-                        time.sleep(0.3)  # Throttle to prevent IP ban (reduced from 0.8s — direct-first means faster connections)
+                        filtered_games.append(game)
+                    
+                    # --- CONCURRENT ODDS FETCHING ---
+                    # Fetch odds for ALL filtered games in parallel (5 at a time)
+                    # This is MUCH faster than sequential: 50 games × 3s = 150s → 10 batches × 3s = ~30s
+                    if filtered_games:
+                        log(f"[BATCH] Fetching odds for {len(filtered_games)} {sport_name} games concurrently...")
+                        odds_batch = client.fetch_odds_batch(sport_id, filtered_games, max_workers=5)
+                        log(f"[BATCH] Got odds for {len(odds_batch)}/{len(filtered_games)} {sport_name} games")
+                    else:
+                        odds_batch = {}
+                    
+                    # --- ANALYZE EACH GAME ---
+                    for game in filtered_games:
+                        # Re-verify lock state inside loop in case it got locked in this iteration
+                        if load_lock_state().get("locked"):
+                            break
+                        
+                        event_id = game.get("id")
+                        odds_data = odds_batch.get(event_id)
+                        
                         if not odds_data:
                             scan_no_odds += 1
                             continue
@@ -1505,6 +1692,9 @@ def main():
             # Prevent cache growing too large
             if len(match_cache) > config.MAX_CACHE_SIZE:
                 match_cache.clear()
+            
+            # Reset re-validation counter each cycle
+            client._revalidate_counter = 0
             
             # --- AUTO-RESTART LOGIC ---
             # If we found games or are locked, reset the failure counter
