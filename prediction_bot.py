@@ -254,8 +254,9 @@ class PredictionEngine:
     @classmethod
     def analyze_match(cls, sport_id, match, odds_markets):
         predictions = []
+        no_signal_reasons = []  # Track why no signal was generated
         if not odds_markets or not isinstance(odds_markets, list):
-            return predictions
+            return predictions, ["no odds data"]
 
         home_team = match.get("home", {}).get("name", "Home")
         away_team = match.get("away", {}).get("name", "Away")
@@ -280,10 +281,12 @@ class PredictionEngine:
 
         # Pre-parse markets for cross-market strategies
         parsed_markets = {}
+        available_markets = []
         for market in odds_markets:
             m_name = market.get("name", "")
             m_odds = market.get("odds", [])
             m_first = market.get("firstPrematch", {})
+            available_markets.append(m_name)
             # Use earliest odds list entry as opening (same bookmaker as live odds)
             # Fall back to firstPrematch if odds list is too short
             m_earliest = m_odds[-1] if m_odds and isinstance(m_odds, list) and len(m_odds) > 1 else m_first
@@ -292,6 +295,8 @@ class PredictionEngine:
                     "first": m_earliest,
                     "latest": m_odds[0]
                 }
+        if "Total" not in parsed_markets:
+            no_signal_reasons.append("no Total market")
 
         # --- MULTI-MARKET / EARLY LIVE STRATEGIES (New Rules) ---
         time_info = match.get("time", {})
@@ -328,42 +333,60 @@ class PredictionEngine:
             open_away = p_1x2.get("row3")
             
             if sport_id == config.SPORT_SOCCER:
-                if open_home and open_away:
+                if not open_home or not open_away:
+                    no_signal_reasons.append("early: no 1X2 odds")
+                elif not (1.50 <= open_home <= 4.00 and 1.50 <= open_away <= 4.00):
+                    no_signal_reasons.append(f"early: 1X2 odds out of range (H={open_home}, A={open_away})")
+                else:
                     # RULE 1: Competitive Under (Soccer) — ACTIVE (widened for aggressive mode)
                     # Widened: accept 1X2 odds 1.50-4.00 (was 1.60-3.50), opening lines 3.00-3.75 (was 3.25-3.50),
                     # line drops of 0.25 or 0.50 (was only 0.25)
                     # IMPORTANT: game must have ACTUALLY started (score must be a valid number like "0-0"),
                     # not just "None" or empty. Pre-match line drops are NOT live signals.
-                    if 1.50 <= open_home <= 4.00 and 1.50 <= open_away <= 4.00:
-                        open_line = p_tot.get("row2")
-                        live_line = l_tot.get("row2")
-                        # Check: game must have started (score must be a valid number like "0-0")
-                        # "None" or "" means the game hasn't started — skip pre-match line drops
-                        score_valid = scores is not None and str(scores) not in ["None", ""] and "-" in str(scores)
-                        # Check: live Under odds must exist and be within acceptable range
-                        live_under_odds = l_tot.get("row3")
-                        if (open_line in [3.00, 3.25, 3.50, 3.75] and live_line is not None
-                                and score_valid
-                                and live_under_odds is not None
-                                and config.MIN_ODDS <= live_under_odds <= config.MAX_ODDS):
-                            line_drop = open_line - live_line if live_line is not None else 0
-                            if line_drop >= 0.25:
-                                predictions.append({
-                                    "market": "Total", "prediction": f"Under {live_line}", "confidence": 95,
-                                    "total_dir": "Under", "total_line": f"{live_line}",
-                                    "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": f"{-line_drop:.2f}",
-                                    "open_over": f"{p_tot.get('row1', 'N/A')}" if p_tot.get('row1') else "N/A",
-                                    "now_over": f"{l_tot.get('row1', 'N/A')}" if l_tot.get('row1') else "N/A",
-                                    "open_under": f"{p_tot.get('row3', 'N/A')}" if p_tot.get('row3') else "N/A",
-                                    "now_under": f"{live_under_odds:.2f}",
-                                    "alg_val": "Comp_Under", "alg_dir": "Under",
-                                    "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line} (-{line_drop:.2f}). Live Under odds: {live_under_odds:.2f}"
-                                })
+                    open_line = p_tot.get("row2")
+                    live_line = l_tot.get("row2")
+                    # Check: game must have started (score must be a valid number like "0-0")
+                    # "None" or "" means the game hasn't started — skip pre-match line drops
+                    score_valid = scores is not None and str(scores) not in ["None", ""] and "-" in str(scores)
+                    # Check: live Under odds must exist and be within acceptable range
+                    live_under_odds = l_tot.get("row3")
+                    if open_line not in [3.00, 3.25, 3.50, 3.75]:
+                        no_signal_reasons.append(f"early: open line {open_line} not in [3.00-3.75]")
+                    elif live_line is None:
+                        no_signal_reasons.append("early: no live line")
+                    elif not score_valid:
+                        no_signal_reasons.append("early: score not valid (game not started?)")
+                    elif live_under_odds is None:
+                        no_signal_reasons.append("early: no live Under odds")
+                    elif not (config.MIN_ODDS <= live_under_odds <= config.MAX_ODDS):
+                        no_signal_reasons.append(f"early: Under odds {live_under_odds:.2f} outside [{config.MIN_ODDS}-{config.MAX_ODDS}]")
+                    else:
+                        line_drop = open_line - live_line if live_line is not None else 0
+                        if line_drop >= 0.25:
+                            predictions.append({
+                                "market": "Total", "prediction": f"Under {live_line}", "confidence": 95,
+                                "total_dir": "Under", "total_line": f"{live_line}",
+                                "open_line": f"{open_line}", "now_line": f"{live_line}", "line_diff": f"{-line_drop:.2f}",
+                                "open_over": f"{p_tot.get('row1', 'N/A')}" if p_tot.get('row1') else "N/A",
+                                "now_over": f"{l_tot.get('row1', 'N/A')}" if l_tot.get('row1') else "N/A",
+                                "open_under": f"{p_tot.get('row3', 'N/A')}" if p_tot.get('row3') else "N/A",
+                                "now_under": f"{live_under_odds:.2f}",
+                                "alg_val": "Comp_Under", "alg_dir": "Under",
+                                "reason": f"Soccer Rule 1: Competitive Under pattern triggered. Line dropped from {open_line} to {live_line} (-{line_drop:.2f}). Live Under odds: {live_under_odds:.2f}"
+                            })
+                        else:
+                            no_signal_reasons.append(f"early: line drop {line_drop:.2f} < 0.25")
                     # RULE 2 (Blowout Over) and RULE 3 (Stale Line Over) REMOVED — poor backtest performance
+            elif sport_id == config.SPORT_BASKETBALL:
+                no_signal_reasons.append("early: no basketball early rule")
+        else:
+            # Not early game — strategies 2-6 will be checked in the main loop below
+            if sport_id == config.SPORT_SOCCER and match_minute > 0:
+                no_signal_reasons.append(f"not early ({match_minute}')")
 
         # If a new strategy triggered, return immediately to lock it
         if predictions:
-            return predictions
+            return predictions, []
 
         for market in odds_markets:
             market_name = market.get("name", "")
@@ -425,17 +448,31 @@ class PredictionEngine:
                 except (ValueError, TypeError):
                     pass
 
-            if market_name == "Total" and not soccer_late_game and not basketball_late:
+            if market_name != "Total":
+                no_signal_reasons.append(f"market={market_name} (not Total)")
+            elif soccer_late_game:
+                no_signal_reasons.append("S2: soccer late game (75'+)")
+            elif basketball_late:
+                no_signal_reasons.append("S2: basketball late (Q3+)")
+            else:
                 ratings = latest_live.get("rating", [])
-                if ratings and isinstance(ratings, list) and len(ratings) > 0:
+                if not ratings or not isinstance(ratings, list) or len(ratings) == 0:
+                    no_signal_reasons.append("S2: no rating data")
+                else:
                     rating_detail = ratings[0]
-                    if isinstance(rating_detail, dict):
+                    if not isinstance(rating_detail, dict):
+                        no_signal_reasons.append("S2: rating not dict")
+                    else:
                         rating_val = rating_detail.get("rating")
                         direction = rating_detail.get("direction")
 
-                        if rating_val is not None:
+                        if rating_val is None:
+                            no_signal_reasons.append("S2: rating value is None")
+                        else:
                             abs_rating = abs(rating_val)
-                            if abs_rating >= config.MIN_ALG1_RATING_THRESHOLD:
+                            if abs_rating < config.MIN_ALG1_RATING_THRESHOLD:
+                                no_signal_reasons.append(f"S2: rating {rating_val:+.2f} < {config.MIN_ALG1_RATING_THRESHOLD}")
+                            else:
                                 dir_word = direction if direction else ("Over" if rating_val > 0 else "Under")
 
                                 opening_over = earliest_live.get("row1") or first_prematch.get("row1")
@@ -452,6 +489,10 @@ class PredictionEngine:
                                 
                                 # Enforce odds range filter — skip if outside 1.65–2.10
                                 if relevant_live_odds is None or not (config.MIN_ODDS <= relevant_live_odds <= config.MAX_ODDS):
+                                    if relevant_live_odds is None:
+                                        no_signal_reasons.append(f"S2: {dir_word} odds is None")
+                                    else:
+                                        no_signal_reasons.append(f"S2: {dir_word} odds {relevant_live_odds:.2f} outside [{config.MIN_ODDS}-{config.MAX_ODDS}]")
                                     continue
                                     
                                 # FILTER D: REMOVED — too strict, was blocking legitimate picks
@@ -520,6 +561,7 @@ class PredictionEngine:
                                         if dir_word == "Over":
                                             # Current total must already be at least 60% of line
                                             if sport_id == config.SPORT_BASKETBALL and pace_ratio < 0.60:
+                                                no_signal_reasons.append(f"S2: pace too low ({pace_ratio:.0%} < 60%)")
                                                 continue
                                             # For Soccer: current goal rate must project to at least 75% of line by 90'
                                             # Lowered from 90% to 75% — aggressive mode, allow more Over picks
@@ -529,11 +571,13 @@ class PredictionEngine:
                                                 safe_minute = max(1, match_minute)
                                                 projected_goals = (current_total / safe_minute) * 90
                                                 if projected_goals < live_line * 0.75:
+                                                    no_signal_reasons.append(f"S2: projected {projected_goals:.1f} < {live_line*0.75:.1f} (75% of line)")
                                                     continue
                                         elif dir_word == "Under":
                                             # For Under: current total must be <= 55% of line (still safely under)
                                             # Stricter threshold (was 70%) — Q3+ games already blocked above
                                             if sport_id == config.SPORT_BASKETBALL and pace_ratio > 0.55:
+                                                no_signal_reasons.append(f"S2: pace too high for Under ({pace_ratio:.0%} > 55%)")
                                                 continue
                                     except (ZeroDivisionError, TypeError, NameError):
                                         pass
@@ -748,7 +792,9 @@ class PredictionEngine:
                                     "reason": f"0-0 at {s6_minute}' with line {live_line_s6}. No scoring for 30+ minutes — market overpricing goals."
                                 })
 
-        return predictions
+        if not no_signal_reasons:
+            no_signal_reasons.append("no strategy triggered")
+        return predictions, no_signal_reasons
 
 
 class TelegramBot:
@@ -1250,6 +1296,7 @@ def main():
                     scan_no_signal = 0
                     scan_blocked = 0
                     scan_picks = 0
+                    scan_no_signal_reasons = {}  # Track WHY no signal was generated
                     
                     if live_games:
                         any_games_found = True
@@ -1325,9 +1372,19 @@ def main():
                             scan_no_odds += 1
                             continue
                         
-                        predictions = PredictionEngine.analyze_match(sport_id, game, odds_data)
+                        predictions, no_signal_reasons = PredictionEngine.analyze_match(sport_id, game, odds_data)
                         if not predictions:
                             scan_no_signal += 1
+                            # Log the top reason for no signal (helps debug why bot isn't picking)
+                            home_name = game.get("home", {}).get("name", "?")
+                            away_name = game.get("away", {}).get("name", "?")
+                            top_reasons = no_signal_reasons[:3] if no_signal_reasons else ["unknown"]
+                            log(f"[NOSIG] {home_name} vs {away_name}: {' | '.join(top_reasons)}")
+                            # Track reasons for scan summary
+                            for r in no_signal_reasons:
+                                # Group by prefix (S2, early, S3, etc.)
+                                prefix = r.split(":")[0] if ":" in r else r
+                                scan_no_signal_reasons[prefix] = scan_no_signal_reasons.get(prefix, 0) + 1
                             continue
                         
                         # Count how many were blocked by filters vs made it through
@@ -1367,7 +1424,14 @@ def main():
                     # Scan summary for this sport
                     analyzed = scan_total - scan_prefiltered - scan_cached
                     if scan_total > 0:
-                        log(f"[SCAN] {sport_name}: {scan_total} total | {scan_prefiltered} filtered | {scan_cached} cached | {analyzed} analyzed | {scan_no_odds} no odds | {scan_no_signal} no signal | {scan_picks} picks")
+                        reasons_str = ""
+                        if scan_no_signal > 0 and scan_no_signal_reasons:
+                            # Show top 3 reasons sorted by frequency
+                            top_reasons = sorted(scan_no_signal_reasons.items(), key=lambda x: -x[1])[:3]
+                            reasons_str = " | top reasons: " + ", ".join(f"{k}({v})" for k, v in top_reasons)
+                        log(f"[SCAN] {sport_name}: {scan_total} total | {scan_prefiltered} filtered | {scan_cached} cached | {analyzed} analyzed | {scan_no_odds} no odds | {scan_no_signal} no signal{reasons_str} | {scan_picks} picks")
+                    else:
+                        log(f"[SCAN] {sport_name}: 0 live games")
 
             # Prevent cache growing too large
             if len(match_cache) > config.MAX_CACHE_SIZE:
