@@ -251,20 +251,18 @@ class InforadarAPIClient:
         error_key = sport_id if sport_id is not None else "default"
         
         # SMART RETRY STRATEGY:
-        # 1. If we have validated proxies, use them directly (skip DIRECT)
-        # 2. If no validated proxies, try DIRECT first (1 attempt, 10s timeout), then PROXY
-        # 3. If DIRECT failed 3+ times recently, skip DIRECT entirely
+        # 1. ALWAYS try DIRECT first (1 attempt, 10s timeout) — it's fastest when it works
+        # 2. If DIRECT fails, fall back to PROXY (validated proxies first)
+        # 3. If DIRECT failed 3+ times recently, skip DIRECT and go straight to PROXY
         # 4. Retry delays are minimal (0.5s) — no more wasting 2-4s between retries
-        has_valid_proxy = proxy_manager.validated and proxy_manager.current_proxy is not None
         direct_failed_recently = proxy_manager.direct_fail_count >= 3
         
         for attempt in range(retries + 1):
             try:
                 # Decide mode:
-                # - If we have a validated proxy, always use PROXY
-                # - If DIRECT failed 3+ times, skip DIRECT
+                # - If DIRECT failed 3+ times recently, skip DIRECT
                 # - Otherwise, try DIRECT first (attempt 0), then PROXY
-                if has_valid_proxy or direct_failed_recently:
+                if direct_failed_recently:
                     use_direct = False
                 else:
                     use_direct = (attempt == 0)  # Only 1 DIRECT attempt, then PROXY
