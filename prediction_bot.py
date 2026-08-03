@@ -140,26 +140,37 @@ class InforadarAPIClient:
         retries = max_retries if max_retries is not None else self.max_retries
         error_key = sport_id if sport_id is not None else "default"
         
-        # Strategy: Try DIRECT first (fast, works on Render), then fall back to proxy
-        # Previous logic tried proxy first — wasted 20+ seconds per attempt on broken proxies
-        # before falling back to direct. Direct connection works fine on Render for inforadar API.
-        # Only use proxy if direct fails (e.g., IP blocked by the API).
+        # SMART RETRY: Try DIRECT first (1 attempt, fast timeout).
+        # If DIRECT fails, switch to PROXY immediately — don't waste time retrying DIRECT.
+        # Previous logic tried DIRECT twice (50s wasted) before falling back to PROXY.
+        # Also: if DIRECT failed recently (direct_fail_count > 0), start with PROXY.
+        direct_failed_recently = proxy_manager.direct_fail_count > 0
+        
         for attempt in range(retries + 1):
             try:
-                # Try DIRECT first (attempts 0, 1), then fall back to PROXY (later attempts)
-                use_direct = attempt <= retries // 2
+                # Decide mode: 
+                # - If DIRECT failed recently, start with PROXY
+                # - Otherwise, try DIRECT first (attempt 0), then PROXY for all retries
+                if direct_failed_recently:
+                    use_direct = False  # Skip DIRECT, go straight to PROXY
+                else:
+                    use_direct = (attempt == 0)  # Only 1 DIRECT attempt, then PROXY
+                
                 opener = proxy_manager.get_opener(use_direct=use_direct)
-                # Use longer timeout for large responses
+                # Shorter timeout for DIRECT (fail fast), longer for PROXY
                 timeout = config.REQUEST_TIMEOUT_SECONDS
-                if endpoint == "live_games":
-                    timeout = max(timeout, 25)  # At least 25s for live_games (large response)
-                elif "game/odds" in endpoint:
-                    timeout = max(timeout, 25)  # At least 25s for game odds (6 markets, large response)
+                if use_direct:
+                    timeout = min(timeout, 12)  # 12s max for DIRECT — fail fast
+                else:
+                    if endpoint == "live_games":
+                        timeout = max(timeout, 20)  # 20s for live_games via PROXY
+                    elif "game/odds" in endpoint:
+                        timeout = max(timeout, 18)  # 18s for game odds via PROXY
                 with opener.open(req, timeout=timeout) as response:
                     if response.status == 200:
                         self.consecutive_errors[error_key] = 0
                         data = json.loads(response.read().decode('utf-8'))
-                        # If direct connection worked, remember that
+                        # If this connection mode worked, remember that
                         if use_direct:
                             proxy_manager.direct_fail_count = 0
                         else:
@@ -169,19 +180,22 @@ class InforadarAPIClient:
                         log(f"API Error: HTTP Status {response.status} for URL {url}", error=True)
                         return None
             except Exception as e:
+                if use_direct:
+                    proxy_manager.direct_fail_count += 1
+                    if proxy_manager.direct_fail_count >= 3:
+                        log(f"[CONNECT] DIRECT failed {proxy_manager.direct_fail_count}x — switching to PROXY-first mode", error=True)
+                else:
+                    proxy_manager.rotate_proxy()
+                
                 if attempt < retries:
-                    delay = min(self.retry_backoff_base * (2 ** attempt), 5)  # 2, 4, 5 seconds max (was 2,4,8 — too slow)
+                    delay = min(self.retry_backoff_base * (2 ** attempt), 4)  # 2, 4, 4s max
                     mode = "DIRECT" if use_direct else "PROXY"
                     log(f"Connection Error fetching {url}: {e} (attempt {attempt+1}/{retries+1}, mode={mode}, retrying in {delay}s)", error=True)
-                    # Rotate proxy on each failed proxy attempt for faster recovery
-                    if not use_direct:
-                        proxy_manager.rotate_proxy()
                     time.sleep(delay)
                     continue
                 else:
                     mode = "DIRECT" if use_direct else "PROXY"
                     log(f"Connection Error fetching {url}: {e} (all {retries+1} attempts failed, last mode={mode})", error=True)
-                    # Only count complete failures (not individual retry attempts)
                     self.consecutive_errors[error_key] = self.consecutive_errors.get(error_key, 0) + 1
                 
                 if self.consecutive_errors.get(error_key, 0) >= 3:
