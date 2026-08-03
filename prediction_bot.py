@@ -1122,13 +1122,49 @@ def main():
                 if settled and scores is not None:
                     if is_void:
                         # API says Cancelled/Abandoned — but the game might have actually finished.
-                        # Some lower-league games (Slovenia, Venezuela etc.) get marked "Cancelled" by the API
-                        # even though they played to completion with a final score.
-                        # FIX: Check the finished_games list. If the game appears there as "Finished" (timeStatus "2"),
-                        # evaluate the result instead of voiding. This catches API mislabeling.
-                        # Only do this once — store the check result so we don't keep re-checking.
-                        if not lock_state.get("void_checked_finished"):
-                            log(f"[VOID-CHECK] API says {void_reason} for {home} vs {away}. Checking finished_games list for corrected status...")
+                        # The API is UNRELIABLE for lower leagues (Slovenia, Venezuela, etc.) and marks
+                        # many finished games as "Cancelled". We can't trust the API's timeStatus alone.
+                        # FIX: Use game time + score data to determine if the game actually finished.
+                        # Logic: If the game has a valid score AND the game time shows it was past halftime,
+                        # it almost certainly finished — the API is just wrong.
+                        # A genuinely cancelled game would be cancelled early (before halftime) or pre-match.
+                        game_actually_finished = False
+
+                        # Check 1: Game time from game_view data
+                        # If the game was past 80', it's almost certainly finished
+                        if game_view:
+                            gv_time = game_view.get("time", {})
+                            try:
+                                gv_min = int(gv_time.get("tm", 0))
+                            except (ValueError, TypeError):
+                                gv_min = 0
+                            # If game time shows 80'+, game definitely finished
+                            if gv_min >= 80:
+                                game_actually_finished = True
+                                log(f"[VOID-CHECK] API says {void_reason} but game time={gv_min}'. Game clearly finished. Overriding void.")
+
+                        # Check 2: Score data — if the game has goals, it was likely played
+                        # A genuinely cancelled game rarely has goals scored
+                        # Only override if we haven't already determined it finished from Check 1
+                        if not game_actually_finished and scores:
+                            try:
+                                if "-" in str(scores):
+                                    sp = str(scores).split("-")
+                                    h = int(sp[0])
+                                    a = int(sp[1])
+                                    total = h + a
+                                    # If 2+ total goals scored, the game was likely played to completion
+                                    # A game abandoned at 60' with 1-0 would only have 1 goal
+                                    # But a game with 1-3 or 1-1 (2+ goals) almost certainly finished
+                                    if total >= 2:
+                                        game_actually_finished = True
+                                        log(f"[VOID-CHECK] API says {void_reason} but score={scores} ({total} goals). Game likely finished. Overriding void.")
+                            except Exception:
+                                pass
+
+                        # Check 3: Also check finished_games list (API might correct itself later)
+                        if not game_actually_finished and not lock_state.get("void_checked_finished"):
+                            log(f"[VOID-CHECK] API says {void_reason} for {home} vs {away}. Checking finished_games list...")
                             finished = client.get_finished_games(sport_id)
                             for fin_game in finished:
                                 if str(fin_game.get("id")) == str(event_id):
@@ -1136,19 +1172,21 @@ def main():
                                     fin_scores = fin_game.get("scores", "0-0")
                                     log(f"[VOID-CHECK] Found event {event_id} in finished_games. timeStatus={fin_status}, score={fin_scores}")
                                     if fin_status == "2":  # Finished!
-                                        # API corrected itself — game actually finished
-                                        is_void = False
-                                        settled = True
+                                        game_actually_finished = True
                                         scores = fin_scores
-                                        time_status = fin_status
-                                        log(f"[VOID-CHECK] Game was actually FINISHED! Score: {fin_scores}. Will evaluate result instead of voiding.")
+                                        log(f"[VOID-CHECK] Game was actually FINISHED in finished_games! Score: {fin_scores}.")
                                     break
-                            # Mark as checked so we don't re-check every cycle
                             lock_state["void_checked_finished"] = True
                             save_lock_state(lock_state)
 
+                        if game_actually_finished:
+                            # Override: game actually finished, evaluate the result
+                            is_void = False
+                            log(f"[VOID-OVERRIDE] Game {home} vs {away} was actually FINISHED. Score: {scores}. Evaluating result instead of voiding.")
+                            # Fall through to normal settlement below
+
                         if is_void:
-                            # Confirmed void — game was genuinely cancelled/abandoned
+                            # Confirmed void — game was genuinely cancelled/abandoned early
                             log(f"[VOID] Match {home} vs {away} was {void_reason}. Score: {scores}. Voiding bet.")
                             result = "VOID"
                             stats = update_stats(result)
@@ -1167,27 +1205,28 @@ def main():
 
                             save_lock_state({"locked": False})
                             log(f"[UNLOCK] Bot is now UNLOCKED. Bet voided ({void_reason}). Scanning for next pick...")
-                        else:
-                            # Normal settlement — game finished (either directly or after void-check correction)
-                            log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
 
-                            home_score, away_score = 0, 0
-                            try:
-                                if "-" in scores:
-                                    parts = scores.split("-")
-                                    home_score = int(parts[0])
-                                    away_score = int(parts[1])
-                            except Exception:
-                                pass
+                    if not is_void:
+                        # Normal settlement — game finished (either directly or after void-override)
+                        log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
 
-                            result = evaluate_prediction(lock_state, home_score, away_score)
-                            stats = update_stats(result)
+                        home_score, away_score = 0, 0
+                        try:
+                            if "-" in scores:
+                                parts = scores.split("-")
+                                home_score = int(parts[0])
+                                away_score = int(parts[1])
+                        except Exception:
+                            pass
 
-                            msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
-                            bot.send_message(msg)
+                        result = evaluate_prediction(lock_state, home_score, away_score)
+                        stats = update_stats(result)
 
-                            save_lock_state({"locked": False})
-                            log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
+                        msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
+                        bot.send_message(msg)
+
+                        save_lock_state({"locked": False})
+                        log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
                 elif not game_view and not settled:
                     log("[API-DOWN] Could not reach API. Will retry next cycle...", error=True)
 
