@@ -311,6 +311,21 @@ class PredictionEngine:
                 }
         if "Total" not in parsed_markets:
             no_signal_reasons.append("no Total market")
+        else:
+            # Log Total market details for debugging
+            t_latest = parsed_markets["Total"].get("latest", {})
+            t_rating = t_latest.get("rating", [])
+            t_row1 = t_latest.get("row1")  # Over odds
+            t_row2 = t_latest.get("row2")  # Line
+            t_row3 = t_latest.get("row3")  # Under odds
+            rating_str = "none"
+            if t_rating and isinstance(t_rating, list) and len(t_rating) > 0:
+                rd = t_rating[0]
+                if isinstance(rd, dict):
+                    rating_str = f"{rd.get('rating', 'N/A')}"
+                else:
+                    rating_str = f"{rd}"
+            no_signal_reasons.append(f"Total: O={t_row1} L={t_row2} U={t_row3} rat={rating_str}")
 
         # --- MULTI-MARKET / EARLY LIVE STRATEGIES (New Rules) ---
         time_info = match.get("time", {})
@@ -533,18 +548,18 @@ class PredictionEngine:
                                     if total_goals > 0 and opening_line is not None and live_line is not None:
                                         line_diff_val = live_line - opening_line
                                         if line_diff_val >= total_goals * 0.5 and line_diff_val <= total_goals + 0.25:
-                                            log(f"[SKIP] Soccer Over blocked: goal-induced line movement (line {opening_line}→{live_line}, goals={total_goals})")
+                                            no_signal_reasons.append(f"S2: goal-induced (line {opening_line}→{live_line}, goals={total_goals})")
                                             continue
                                         if live_line > 0 and (total_goals / live_line) >= 0.5:
-                                            log(f"[SKIP] Soccer Over blocked: goals-to-line ratio too high (goals={total_goals}, line={live_line}, ratio={total_goals/live_line:.2f})")
+                                            no_signal_reasons.append(f"S2: goals/line ratio {total_goals/live_line:.2f} (goals={total_goals}, line={live_line})")
                                             continue
                                     if live_line is not None and live_line > 4.50:
-                                        log(f"[SKIP] Soccer Over blocked: line too high ({live_line} > 4.50)")
+                                        no_signal_reasons.append(f"S2: line too high ({live_line} > 4.50)")
                                         continue
 
                                     # FILTER F: Soccer Over — block weak halftime Over picks
                                     if total_goals <= 1 and match_minute >= 40 and match_minute <= 55:
-                                        log(f"[SKIP] Soccer Over blocked: halftime with ≤1 goal (goals={total_goals}, minute={match_minute}, need 2+ more goals in 2nd half)")
+                                        no_signal_reasons.append(f"S2: halftime Over with ≤1 goal (goals={total_goals}, min={match_minute})")
                                         continue
 
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
@@ -1432,7 +1447,7 @@ def main():
                             # Log the top reason for no signal (helps debug why bot isn't picking)
                             home_name = game.get("home", {}).get("name", "?")
                             away_name = game.get("away", {}).get("name", "?")
-                            top_reasons = no_signal_reasons[:3] if no_signal_reasons else ["unknown"]
+                            top_reasons = no_signal_reasons[:5] if no_signal_reasons else ["unknown"]
                             log(f"[NOSIG] {home_name} vs {away_name}: {' | '.join(top_reasons)}")
                             # Track reasons for scan summary
                             for r in no_signal_reasons:
