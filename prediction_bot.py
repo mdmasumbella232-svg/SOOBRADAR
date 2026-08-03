@@ -1259,25 +1259,44 @@ def main():
                         if time_status in ["3", "4", "99", "10"]:
                             continue
                         
-                        
-                        # Prevent betting on games in the absolute final moments (API ghost lines)
+                        # Pre-filter: skip games that can't trigger any strategy
+                        # This saves time when there are 100+ live games per sport
                         time_info = game.get("time", {})
-                        if sport_id == config.SPORT_BASKETBALL:
+                        scores = game.get("scores", "0-0")
+                        
+                        if sport_id == config.SPORT_SOCCER:
+                            try:
+                                tm_val = int(time_info.get("tm", 0))
+                            except (ValueError, TypeError):
+                                tm_val = 0
+                            # Skip games past 75' — FILTER A blocks all soccer totals after 75'
+                            # No strategy triggers after 75' (Strategy 4 caps at 74', Strategy 6 caps at 70')
+                            if tm_val >= 75:
+                                continue
+                            # Skip games before 2' — not enough data for any strategy
+                            # Soccer Rule 1 needs 0-10' but the game needs at least a couple minutes
+                            # to have a valid score and line movement
+                            if tm_val < 2 and str(time_info.get("tm", "")) != "HT":
+                                continue
+                            # Skip games with 4+ total goals — almost no strategy triggers
+                            # and the Over line would be too high (filtered by line cap)
+                            try:
+                                if "-" in str(scores):
+                                    sp = str(scores).split("-")
+                                    total_goals = int(sp[0]) + int(sp[1])
+                                    if total_goals >= 4:
+                                        continue
+                            except Exception:
+                                pass
+                        elif sport_id == config.SPORT_BASKETBALL:
+                            # Prevent betting on games in the absolute final moments (API ghost lines)
                             q_str = str(time_info.get("q", ""))
                             tm_str = str(time_info.get("tm", ""))
                             if str(time_info.get("tt", "")) == "":
                                 continue
                             if q_str == "4" and tm_str in ["0", "1"]:
                                 continue
-                        elif sport_id == config.SPORT_SOCCER:
-                            try:
-                                tm_val = int(time_info.get("tm", 0))
-                                if tm_val >= 88:
-                                    continue
-                            except (ValueError, TypeError):
-                                pass
-                        scores = game.get("scores", "0-0")
-                        time_info = game.get("time", {})
+                        
                         state_key = f"{scores}_{json.dumps(time_info)}"
                         
                         if match_cache.get(event_id) == state_key:
@@ -1286,7 +1305,7 @@ def main():
                         match_cache[event_id] = state_key
                         
                         odds_data = client.get_game_odds(sport_id, event_id)
-                        time.sleep(0.8)  # Throttle to prevent IP ban (reduced from 1.5s)
+                        time.sleep(0.3)  # Throttle to prevent IP ban (reduced from 0.8s — direct-first means faster connections)
                         if not odds_data:
                             continue
                         
