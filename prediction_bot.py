@@ -1121,46 +1121,73 @@ def main():
 
                 if settled and scores is not None:
                     if is_void:
-                        # Game was cancelled/postponed/abandoned — VOID the bet
-                        log(f"[VOID] Match {home} vs {away} was {void_reason}. Score: {scores}. Voiding bet.")
-                        result = "VOID"
-                        stats = update_stats(result)
+                        # API says Cancelled/Abandoned — but the game might have actually finished.
+                        # Some lower-league games (Slovenia, Venezuela etc.) get marked "Cancelled" by the API
+                        # even though they played to completion with a final score.
+                        # FIX: Check the finished_games list. If the game appears there as "Finished" (timeStatus "2"),
+                        # evaluate the result instead of voiding. This catches API mislabeling.
+                        # Only do this once — store the check result so we don't keep re-checking.
+                        if not lock_state.get("void_checked_finished"):
+                            log(f"[VOID-CHECK] API says {void_reason} for {home} vs {away}. Checking finished_games list for corrected status...")
+                            finished = client.get_finished_games(sport_id)
+                            for fin_game in finished:
+                                if str(fin_game.get("id")) == str(event_id):
+                                    fin_status = str(fin_game.get("timeStatus", ""))
+                                    fin_scores = fin_game.get("scores", "0-0")
+                                    log(f"[VOID-CHECK] Found event {event_id} in finished_games. timeStatus={fin_status}, score={fin_scores}")
+                                    if fin_status == "2":  # Finished!
+                                        # API corrected itself — game actually finished
+                                        is_void = False
+                                        settled = True
+                                        scores = fin_scores
+                                        time_status = fin_status
+                                        log(f"[VOID-CHECK] Game was actually FINISHED! Score: {fin_scores}. Will evaluate result instead of voiding.")
+                                    break
+                            # Mark as checked so we don't re-check every cycle
+                            lock_state["void_checked_finished"] = True
+                            save_lock_state(lock_state)
 
-                        sport_emoji = "⚽" if sport_id == config.SPORT_SOCCER else "🏀"
-                        void_msg = (
-                            f"💤 <b>BET VOIDED — {void_reason.upper()}</b>\n\n"
-                            f"{sport_emoji} {home} vs {away}\n"
-                            f"Final: {scores}\n"
-                            f"Pick: {prediction}\n"
-                            f"Reason: Game was {void_reason}\n\n"
-                            f"🔓 <i>Bot is now UNLOCKED — scanning for next pick</i>\n\n"
-                            f"{format_stats_line(stats)}"
-                        )
-                        bot.send_message(void_msg)
+                        if is_void:
+                            # Confirmed void — game was genuinely cancelled/abandoned
+                            log(f"[VOID] Match {home} vs {away} was {void_reason}. Score: {scores}. Voiding bet.")
+                            result = "VOID"
+                            stats = update_stats(result)
 
-                        save_lock_state({"locked": False})
-                        log(f"[UNLOCK] Bot is now UNLOCKED. Bet voided ({void_reason}). Scanning for next pick...")
-                    else:
-                        # Normal settlement — game finished
-                        log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
+                            sport_emoji = "⚽" if sport_id == config.SPORT_SOCCER else "🏀"
+                            void_msg = (
+                                f"💤 <b>BET VOIDED — {void_reason.upper()}</b>\n\n"
+                                f"{sport_emoji} {home} vs {away}\n"
+                                f"Final: {scores}\n"
+                                f"Pick: {prediction}\n"
+                                f"Reason: Game was {void_reason}\n\n"
+                                f"🔓 <i>Bot is now UNLOCKED — scanning for next pick</i>\n\n"
+                                f"{format_stats_line(stats)}"
+                            )
+                            bot.send_message(void_msg)
 
-                        home_score, away_score = 0, 0
-                        try:
-                            if "-" in scores:
-                                parts = scores.split("-")
-                                home_score = int(parts[0])
-                                away_score = int(parts[1])
-                        except Exception:
-                            pass
+                            save_lock_state({"locked": False})
+                            log(f"[UNLOCK] Bot is now UNLOCKED. Bet voided ({void_reason}). Scanning for next pick...")
+                        else:
+                            # Normal settlement — game finished (either directly or after void-check correction)
+                            log(f"[SETTLE] Match {home} vs {away} confirmed finished. Score: {scores}. Resolving...")
 
-                        result = evaluate_prediction(lock_state, home_score, away_score)
-                        stats = update_stats(result)
+                            home_score, away_score = 0, 0
+                            try:
+                                if "-" in scores:
+                                    parts = scores.split("-")
+                                    home_score = int(parts[0])
+                                    away_score = int(parts[1])
+                            except Exception:
+                                pass
 
-                        msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
-                        bot.send_message(msg)
+                            result = evaluate_prediction(lock_state, home_score, away_score)
+                            stats = update_stats(result)
 
-                        save_lock_state({"locked": False})
-                        log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
+                            msg = format_settlement_alert(sport_id, lock_state, scores, result, stats)
+                            bot.send_message(msg)
+
+                            save_lock_state({"locked": False})
+                            log(f"[UNLOCK] Bot is now UNLOCKED. Result: {result}. Scanning for next pick...")
                 elif not game_view and not settled:
                     log("[API-DOWN] Could not reach API. Will retry next cycle...", error=True)
 
