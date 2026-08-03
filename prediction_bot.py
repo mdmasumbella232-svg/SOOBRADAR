@@ -494,6 +494,20 @@ class PredictionEngine:
                                         log(f"[SKIP] Soccer Over blocked: line too high ({live_line} > 4.50)")
                                         continue
 
+                                    # FILTER F: Soccer Over — block weak halftime Over picks
+                                    # At halftime (40-55') with 0-1 goals, picking Over is a bad bet.
+                                    # You need 2+ MORE goals in the second half — that's asking too much
+                                    # from a weak 0.30 Alg.1 signal with no market confirmation.
+                                    # Real examples this blocks:
+                                    #   Over 2.5 at 45' with 1-0 (Slovenia) — line dropped 2.75→2.5, market says Under
+                                    #   Over 2.5 at 45' with 0-1 (Venezuela) — line flat 2.5→2.5, no movement
+                                    # Legitimate picks NOT blocked:
+                                    #   Over 2.5 at 45' with 2-0 (2 goals) — already on pace for Over
+                                    #   Over 2.5 at 30' with 1-0 — still 60 minutes left, reasonable
+                                    if total_goals <= 1 and match_minute >= 40 and match_minute <= 55:
+                                        log(f"[SKIP] Soccer Over blocked: halftime with ≤1 goal (goals={total_goals}, minute={match_minute}, need 2+ more goals in 2nd half)")
+                                        continue
+
                                 # FILTER C: Score Feasibility — current score must be on pace for the bet
                                 if live_line is not None and live_line > 0:
                                     try:
