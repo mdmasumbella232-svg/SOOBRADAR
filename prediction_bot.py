@@ -1240,7 +1240,14 @@ def main():
                     sport_name = "Soccer" if sport_id == config.SPORT_SOCCER else "Basketball"
                     live_games = client.get_live_games(sport_id)
                     
-                    log(f"[Status: UNLOCKED] Scanned {len(live_games)} live {sport_name} games.")
+                    # Track scan stats for this sport
+                    scan_total = len(live_games)
+                    scan_prefiltered = 0
+                    scan_cached = 0
+                    scan_no_odds = 0
+                    scan_no_signal = 0
+                    scan_blocked = 0
+                    scan_picks = 0
                     
                     if live_games:
                         any_games_found = True
@@ -1272,11 +1279,13 @@ def main():
                             # Skip games past 75' — FILTER A blocks all soccer totals after 75'
                             # No strategy triggers after 75' (Strategy 4 caps at 74', Strategy 6 caps at 70')
                             if tm_val >= 75:
+                                scan_prefiltered += 1
                                 continue
                             # Skip games before 2' — not enough data for any strategy
                             # Soccer Rule 1 needs 0-10' but the game needs at least a couple minutes
                             # to have a valid score and line movement
                             if tm_val < 2 and str(time_info.get("tm", "")) != "HT":
+                                scan_prefiltered += 1
                                 continue
                             # Skip games with 4+ total goals — almost no strategy triggers
                             # and the Over line would be too high (filtered by line cap)
@@ -1285,6 +1294,7 @@ def main():
                                     sp = str(scores).split("-")
                                     total_goals = int(sp[0]) + int(sp[1])
                                     if total_goals >= 4:
+                                        scan_prefiltered += 1
                                         continue
                             except Exception:
                                 pass
@@ -1293,13 +1303,16 @@ def main():
                             q_str = str(time_info.get("q", ""))
                             tm_str = str(time_info.get("tm", ""))
                             if str(time_info.get("tt", "")) == "":
+                                scan_prefiltered += 1
                                 continue
                             if q_str == "4" and tm_str in ["0", "1"]:
+                                scan_prefiltered += 1
                                 continue
                         
                         state_key = f"{scores}_{json.dumps(time_info)}"
                         
                         if match_cache.get(event_id) == state_key:
+                            scan_cached += 1
                             continue
                         
                         match_cache[event_id] = state_key
@@ -1307,9 +1320,17 @@ def main():
                         odds_data = client.get_game_odds(sport_id, event_id)
                         time.sleep(0.3)  # Throttle to prevent IP ban (reduced from 0.8s — direct-first means faster connections)
                         if not odds_data:
+                            scan_no_odds += 1
                             continue
                         
                         predictions = PredictionEngine.analyze_match(sport_id, game, odds_data)
+                        if not predictions:
+                            scan_no_signal += 1
+                            continue
+                        
+                        # Count how many were blocked by filters vs made it through
+                        scan_blocked += len(predictions) - 1 if len(predictions) > 1 else 0
+                        scan_picks += 1
                         if predictions:
                             # We pick the first matching prediction and lock on it
                             pred = predictions[0]
@@ -1340,6 +1361,11 @@ def main():
                                 break
                                 
                             time.sleep(1.0)
+
+                    # Scan summary for this sport
+                    analyzed = scan_total - scan_prefiltered - scan_cached
+                    if scan_total > 0:
+                        log(f"[SCAN] {sport_name}: {scan_total} total | {scan_prefiltered} filtered | {scan_cached} cached | {analyzed} analyzed | {scan_no_odds} no odds | {scan_no_signal} no signal | {scan_picks} picks")
 
             # Prevent cache growing too large
             if len(match_cache) > config.MAX_CACHE_SIZE:
