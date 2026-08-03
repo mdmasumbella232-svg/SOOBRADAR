@@ -149,10 +149,12 @@ class InforadarAPIClient:
                 # Try DIRECT first (attempts 0, 1), then fall back to PROXY (later attempts)
                 use_direct = attempt <= retries // 2
                 opener = proxy_manager.get_opener(use_direct=use_direct)
-                # Use longer timeout for live_games endpoint (large response)
+                # Use longer timeout for large responses
                 timeout = config.REQUEST_TIMEOUT_SECONDS
                 if endpoint == "live_games":
-                    timeout = max(timeout, 20)  # At least 20s for live_games
+                    timeout = max(timeout, 25)  # At least 25s for live_games (large response)
+                elif "game/odds" in endpoint:
+                    timeout = max(timeout, 25)  # At least 25s for game odds (6 markets, large response)
                 with opener.open(req, timeout=timeout) as response:
                     if response.status == 200:
                         self.consecutive_errors[error_key] = 0
